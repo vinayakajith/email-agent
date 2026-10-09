@@ -6,6 +6,7 @@ also makes widening the time frame later only download what is missing.
 """
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -17,6 +18,7 @@ from email_agent.db.pool import connection
 from email_agent.ingest.imap_client import GmailIMAP, RawMessage
 from email_agent.ingest.parser import parse_email
 
+log = logging.getLogger(__name__)
 FETCH_BATCH = 100
 Progress = Callable[[str, int, int], None]  # (stage, done, total)
 
@@ -97,6 +99,16 @@ def _row(account_id: int, m: RawMessage) -> dict:
     }
 
 
+def _rows(account_id: int, msgs: list[RawMessage]) -> list[dict]:
+    rows = []
+    for m in msgs:
+        try:
+            rows.append(_row(account_id, m))
+        except Exception as e:  # one malformed message must not stop the mailbox
+            log.warning("skipping uid %s: %s: %s", m.uid, type(e).__name__, e)
+    return rows
+
+
 async def fetch_stage(account: Account, plan: FetchPlan, job_id: int, progress: Progress = _noop) -> int:
     total, done = len(plan.to_fetch), 0
     progress("fetch", 0, total)
@@ -108,12 +120,8 @@ async def fetch_stage(account: Account, plan: FetchPlan, job_id: int, progress: 
         for i in range(0, total, FETCH_BATCH):
             batch = plan.to_fetch[i : i + FETCH_BATCH]
             msgs = await asyncio.to_thread(imap.fetch, batch)
-            rows = []
-            for m in msgs:
-                try:
-                    rows.append(_row(account.id, m))
-                except Exception as e:  # one malformed message must not stop the mailbox
-                    print(f"skip uid {m.uid}: {type(e).__name__}: {e}")
+            # MIME/HTML parsing is CPU-bound; keep it off the event loop.
+            rows = await asyncio.to_thread(_rows, account.id, msgs)
             async with connection() as conn:
                 async with conn.transaction():
                     async with conn.cursor() as cur:

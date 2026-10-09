@@ -12,7 +12,7 @@ def test_metrics():
 
 async def test_example_golden_set_runs_on_fixture_mailbox(ingested):
     example = Path(__file__).parents[1] / "evals" / "retrieval_golden.example.yaml"
-    scores, warnings = await run_eval(example, k=5)
+    scores, warnings = await run_eval(ingested.id, example, k=5)
     assert warnings == []
     assert set(scores) == {"bm25", "vector", "hybrid (rrf)", "hybrid + rerank"}
     assert scores["hybrid + rerank"].recall == 1.0

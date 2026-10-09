@@ -85,6 +85,7 @@ async def _load(pairs: list[tuple[int, int]]) -> dict[int, dict]:
 
 
 async def hybrid_search(
+    account_id: int,
     query: str,
     filters: SearchFilters | None = None,
     k: int = 10,
@@ -94,15 +95,15 @@ async def hybrid_search(
     filters = filters or SearchFilters()
     lists: dict[str, list[dict]] = {}
     if mode == "bm25":
-        lists["bm25"] = await bm25_search(query, filters, CANDIDATES_PER_RETRIEVER)
+        lists["bm25"] = await bm25_search(account_id, query, filters, CANDIDATES_PER_RETRIEVER)
     else:
         qvec = await get_embedder().embed_query(query)
         if mode == "vector":
-            lists["vector"] = await vector_search(qvec, filters, CANDIDATES_PER_RETRIEVER)
+            lists["vector"] = await vector_search(account_id, qvec, filters, CANDIDATES_PER_RETRIEVER)
         else:
             lists["bm25"], lists["vector"] = await asyncio.gather(
-                bm25_search(query, filters, CANDIDATES_PER_RETRIEVER),
-                vector_search(qvec, filters, CANDIDATES_PER_RETRIEVER),
+                bm25_search(account_id, query, filters, CANDIDATES_PER_RETRIEVER),
+                vector_search(account_id, qvec, filters, CANDIDATES_PER_RETRIEVER),
             )
 
     chunk_to_email = {r["id"]: r["email_id"] for rows in lists.values() for r in rows}

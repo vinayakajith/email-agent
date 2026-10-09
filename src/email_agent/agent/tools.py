@@ -188,7 +188,7 @@ def _date(v: str | None) -> date | None:
 
 async def search_emails(ctx: ToolContext, query, date_from=None, date_to=None, sender=None, category=None, limit=None):
     filters = SearchFilters(_date(date_from), _date(date_to), sender, category)
-    hits = await hybrid_search(query, filters, k=min(limit or 10, 25))
+    hits = await hybrid_search(ctx.account.id, query, filters, k=min(limit or 10, 25))
     results = []
     for h in hits:
         # Drop the repeated header lines from the excerpt; they are already in the fields.

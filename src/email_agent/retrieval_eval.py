@@ -37,11 +37,11 @@ def reciprocal_rank(ranked: list[int], relevant: set[int]) -> float:
     return next((1.0 / i for i, doc in enumerate(ranked, start=1) if doc in relevant), 0.0)
 
 
-async def resolve_expected(expected: list[dict]) -> set[int]:
+async def resolve_expected(account_id: int, expected: list[dict]) -> set[int]:
     ids: set[int] = set()
     async with connection() as conn:
         for matcher in expected:
-            clauses, params = [], []
+            clauses, params = ["account_id = %s"], [account_id]
             if v := matcher.get("from_contains"):
                 clauses.append("(from_addr ILIKE %s OR from_name ILIKE %s)")
                 params += [f"%{v}%"] * 2
@@ -51,25 +51,25 @@ async def resolve_expected(expected: list[dict]) -> set[int]:
             if v := matcher.get("email_id"):
                 clauses.append("id = %s")
                 params.append(v)
-            if not clauses:
+            if len(clauses) == 1:
                 continue
             rows = await (await conn.execute(f"SELECT id FROM emails WHERE {' AND '.join(clauses)}", params)).fetchall()
             ids |= {r["id"] for r in rows}
     return ids
 
 
-async def run_eval(golden_path: Path, k: int = 10) -> tuple[dict[str, ModeScore], list[str]]:
+async def run_eval(account_id: int, golden_path: Path, k: int = 10) -> tuple[dict[str, ModeScore], list[str]]:
     cases = yaml.safe_load(golden_path.read_text()) or []
     sums = {name: [0.0, 0.0] for name in MODES}
     used, warnings = 0, []
     for case in cases:
-        relevant = await resolve_expected(case.get("expected", []))
+        relevant = await resolve_expected(account_id, case.get("expected", []))
         if not relevant:
             warnings.append(f"no email matches the expectations for: {case['question']!r}")
             continue
         used += 1
         for name, opts in MODES.items():
-            hits = await hybrid_search(case["question"], k=k, **opts)
+            hits = await hybrid_search(account_id, case["question"], k=k, **opts)
             ranked = [h.email_id for h in hits]
             sums[name][0] += recall_at_k(ranked, relevant, k)
             sums[name][1] += reciprocal_rank(ranked, relevant)

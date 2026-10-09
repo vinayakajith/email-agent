@@ -12,6 +12,22 @@ app.add_typer(db_app, name="db")
 console = Console()
 
 
+def setup_logging(default: str = "WARNING") -> None:
+    import logging
+
+    from rich.logging import RichHandler
+
+    from email_agent.config import get_settings
+
+    level = (get_settings().log_level or default).upper()
+    logging.basicConfig(level=level, format="%(name)s: %(message)s", handlers=[RichHandler(console=console, show_path=False)])
+
+
+@app.callback()
+def _main() -> None:
+    setup_logging()
+
+
 def _run(coro):
     async def wrapper():
         from email_agent.db.pool import close_pool
@@ -245,14 +261,20 @@ def sync(account: str = typer.Option(None, help="Account email if several are co
 def eval_retrieval(
     golden: Path = typer.Argument(Path("evals/retrieval_golden.yaml")),
     k: int = typer.Option(10),
+    account: str = typer.Option(None, help="Account email if several are connected"),
 ) -> None:
     """Compare BM25, vector, hybrid and hybrid+rerank on hand-labelled questions."""
+    from email_agent.accounts import get_account
     from email_agent.retrieval_eval import run_eval
 
     if not golden.exists():
         console.print(f"[red]{golden} not found.[/] Start from evals/retrieval_golden.example.yaml.")
         raise typer.Exit(1)
-    scores, warnings = _run(run_eval(golden, k))
+
+    async def main():
+        return await run_eval((await get_account(account)).id, golden, k)
+
+    scores, warnings = _run(main())
     for w in warnings:
         console.print(f"[yellow]warning:[/] {w}")
     table = Table("mode", f"recall@{k}", "MRR")
@@ -271,8 +293,10 @@ def search(
     category: str = typer.Option(None),
     since: str = typer.Option(None, help="YYYY-MM-DD"),
     until: str = typer.Option(None, help="YYYY-MM-DD, inclusive"),
+    account: str = typer.Option(None, help="Account email if several are connected"),
 ) -> None:
     """Debug view of retrieval: per-stage ranks for each hit."""
+    from email_agent.accounts import get_account
     from email_agent.search.filters import SearchFilters
     from email_agent.search.hybrid import hybrid_search
 
@@ -282,7 +306,11 @@ def search(
         sender=sender,
         category=category,
     )
-    hits = _run(hybrid_search(query, filters, k=k, mode=mode, rerank=not no_rerank))
+    async def main():
+        acct = await get_account(account)
+        return await hybrid_search(acct.id, query, filters, k=k, mode=mode, rerank=not no_rerank)
+
+    hits = _run(main())
     table = Table("#", "score", "ranks", "date", "from", "subject")
     for i, h in enumerate(hits, start=1):
         ranks = " ".join(f"{name}={rank}" for name, rank in h.ranks.items() if rank is not None)

@@ -5,6 +5,7 @@ attention" into exact SQL, instead of the agent guessing from retrieved snippets
 """
 
 import asyncio
+import logging
 from datetime import date
 from typing import Literal
 
@@ -17,6 +18,7 @@ from email_agent.config import get_settings
 from email_agent.db.pool import connection
 from email_agent.prompt_cache import ONE_SHOT_CACHE_OPTIONS, cache_key, text_message, usage_counts
 
+log = logging.getLogger(__name__)
 MAX_BODY_TOKENS = 2_000
 # Bump whenever EmailFacts or INSTRUCTIONS change meaning; `email-agent reenrich` then re-extracts
 # facts produced by older versions so stored data matches the current definitions.
@@ -203,7 +205,7 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
         for e, r in zip(emails, results):
             if isinstance(r, BaseException):
                 failed += 1
-                print(f"enrich failed for email {e['id']}: {type(r).__name__}: {r}")
+                log.warning("extraction failed for email %s: %s: %s", e["id"], type(r).__name__, r)
             else:
                 rows.append(facts_row(e["id"], r, enricher.model))
         async with connection() as conn:

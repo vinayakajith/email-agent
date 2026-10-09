@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # Passed as reasoning.effort to the enrich model.
     enrich_reasoning_effort: str = "low"
     agent_max_steps: int = 15
+    # Empty means: WARNING for interactive commands, INFO for the worker.
+    log_level: str = ""
     # Passed as reasoning.effort to the agent model.
     agent_reasoning_effort: str = "medium"
 

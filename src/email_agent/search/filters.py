@@ -10,9 +10,12 @@ class SearchFilters:
     category: str | None = None
     labels: list[str] = field(default_factory=list)
 
-    def chunk_sql(self, alias: str = "c") -> tuple[str, list]:
-        """SQL predicates over the chunks table (filter columns are denormalized onto it)."""
-        clauses, params = [], []
+    def chunk_sql(self, account_id: int, alias: str = "c") -> tuple[str, list]:
+        """SQL predicates over the chunks table (filter columns are denormalized onto it).
+
+        Always scoped to one account: retrieval never crosses mailboxes.
+        """
+        clauses, params = [f"{alias}.account_id = %s"], [account_id]
         if self.date_from:
             clauses.append(f"{alias}.sent_at >= %s")
             params.append(self.date_from)
@@ -31,4 +34,4 @@ class SearchFilters:
         if self.labels:
             clauses.append(f"{alias}.email_id IN (SELECT id FROM emails WHERE labels && %s)")
             params.append(self.labels)
-        return (" AND ".join(clauses) or "TRUE"), params
+        return " AND ".join(clauses), params

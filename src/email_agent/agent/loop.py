@@ -7,6 +7,7 @@ events so the same code drives the CLI now and a streaming UI later.
 
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -23,6 +24,7 @@ from email_agent.config import get_settings
 from email_agent.db.pool import connection
 from email_agent.prompt_cache import CACHE_OPTIONS, cache_key, text_message, usage_counts
 
+log = logging.getLogger(__name__)
 CITATION_RE = re.compile(r"\[#(\d+)\]")
 ConfirmFn = Callable[[dict], Awaitable[bool]]
 
@@ -135,12 +137,12 @@ class Agent:
         try:
             async with connection() as conn:
                 await conn.execute(
-                    """INSERT INTO agent_runs (conversation_id, question, events, answer, input_tokens,
+                    """INSERT INTO agent_runs (account_id, conversation_id, question, events, answer, input_tokens,
                                                cached_tokens, cache_write_tokens, output_tokens, latency_ms)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (self.conversation_id, question, Jsonb([e.to_dict() for e in events], dumps=lambda o: json.dumps(o, default=str)),
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (self.account.id, self.conversation_id, question, Jsonb([e.to_dict() for e in events], dumps=lambda o: json.dumps(o, default=str)),
                      answer, usage["in"], usage["cached"], usage["cache_write"], usage["out"],
                      int((time.monotonic() - started) * 1000)),
                 )
-        except Exception as e:  # tracing must never break an answer
-            print(f"could not save agent run: {e}")
+        except Exception:  # tracing must never break an answer
+            log.exception("could not save agent run")

@@ -1,5 +1,6 @@
 """Voyage embeddings: token-aware batching and the embed stage of the pipeline."""
 
+import asyncio
 from collections.abc import Sequence
 
 import numpy as np
@@ -58,8 +59,8 @@ class Embedder:
 
 
 INSERT_CHUNK = """
-INSERT INTO chunks (email_id, chunk_index, content, token_count, sent_at, from_addr, category, embedding)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+INSERT INTO chunks (account_id, email_id, chunk_index, content, token_count, sent_at, from_addr, category, embedding)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -90,10 +91,8 @@ async def embed_stage(account, job_id: int, progress, embedder: Embedder | None 
             ).fetchall()
         if not emails:
             break
-        rows = []
-        for e in emails:
-            for c in chunk_email(e):
-                rows.append((e, c))
+        # Tokenizing and chunking is CPU-bound; keep it off the event loop.
+        rows = await asyncio.to_thread(lambda: [(e, c) for e in emails for c in chunk_email(e)])
         vectors = await embedder.embed_documents([c.content for _, c in rows], [c.token_count for _, c in rows])
         ids = [e["id"] for e in emails]
         async with connection() as conn:
@@ -104,7 +103,7 @@ async def embed_stage(account, job_id: int, progress, embedder: Embedder | None 
                     await cur.executemany(
                         INSERT_CHUNK,
                         [
-                            (e["id"], c.index, c.content, c.token_count, e["sent_at"], e["from_addr"], e["category"],
+                            (account.id, e["id"], c.index, c.content, c.token_count, e["sent_at"], e["from_addr"], e["category"],
                              np.asarray(v, dtype=np.float32))
                             for (e, c), v in zip(rows, vectors)
                         ],

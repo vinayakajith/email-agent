@@ -32,19 +32,46 @@ async def test_every_stage_reaches_embedded(ingested):
 
 async def test_bm25_vector_and_hybrid_find_the_card_statement(ingested):
     for mode in ("bm25", "vector", "hybrid"):
-        hits = await hybrid_search("credit card statement amount due", k=3, mode=mode)
+        hits = await hybrid_search(ingested.id, "credit card statement amount due", k=3, mode=mode)
         assert hits, mode
         assert hits[0].from_addr == "alerts@hdfcbank.net", mode
-    hit = (await hybrid_search("credit card statement", k=1))[0]
+    hit = (await hybrid_search(ingested.id, "credit card statement", k=1))[0]
     assert set(hit.ranks) == {"bm25", "vector", "fused", "rerank"}
 
 
 async def test_filters_apply_to_both_retrievers(ingested):
     f = SearchFilters(sender="netflix")
     for mode in ("bm25", "vector", "hybrid"):
-        hits = await hybrid_search("membership renewed", f, mode=mode)
+        hits = await hybrid_search(ingested.id, "membership renewed", f, mode=mode)
         assert {h.from_addr for h in hits} == {"info@mailer.netflix.com"}, mode
     f = SearchFilters(date_from=date(2026, 10, 1), category="bill")
-    hits = await hybrid_search("invoice statement", f, mode="hybrid")
+    hits = await hybrid_search(ingested.id, "invoice statement", f, mode="hybrid")
     assert {h.from_addr for h in hits} == {"alerts@hdfcbank.net", "billing@aws.amazon.com"}
-    assert await hybrid_search("membership", SearchFilters(date_to=date(2026, 9, 1))) == []
+    assert await hybrid_search(ingested.id, "membership", SearchFilters(date_to=date(2026, 9, 1))) == []
+
+
+async def test_search_never_crosses_accounts(ingested):
+    from email_agent.accounts import Account
+    from email_agent.db.pool import connection
+    from email_agent.ingest import pipeline
+
+    async with connection() as conn:
+        row = await (await conn.execute(
+            "INSERT INTO accounts (email, imap_host, smtp_host) VALUES ('other@gmail.com', 'imap', 'smtp') "
+            "RETURNING id, email, imap_host, smtp_host, auth_method"
+        )).fetchone()
+        mine = {r["id"] for r in await (await conn.execute(
+            "SELECT id FROM emails WHERE account_id = %s", (ingested.id,))).fetchall()}
+    other = Account(**row)
+    # Same mailbox content ingested into a second account.
+    await pipeline.run_ingest(other, await pipeline.plan_fetch(other, None), None)
+
+    for mode in ("bm25", "vector", "hybrid"):
+        for acct, allowed in ((ingested, mine), (other, None)):
+            hits = await hybrid_search(acct.id, "credit card statement", k=10, mode=mode)
+            assert hits, (mode, acct.email)
+            ids = {h.email_id for h in hits}
+            if allowed is not None:
+                assert ids <= allowed, mode
+            else:
+                assert not ids & mine, mode
