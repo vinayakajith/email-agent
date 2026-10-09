@@ -9,21 +9,51 @@ draft email, which is sent only after you approve it.
 Voyage `voyage-4-large` embeddings · Voyage `rerank-3` · OpenAI GPT-6-class models.
 Retrieval is hybrid: BM25 + vector → reciprocal rank fusion → rerank.
 
-## Setup
+## Run it
 
 ```bash
-docker compose up -d            # Postgres on localhost:5434
+docker compose up -d                     # Postgres on localhost:5434
 uv sync
+(cd web && npm install && npm run build) # the web UI
+uv run email-agent app                   # opens http://127.0.0.1:8765 — onboarding, then chat
+```
+
+`email-agent app` serves the UI and API on 127.0.0.1 only, starts the background worker if
+none is running, and stops both on Ctrl-C. Onboarding asks for your OpenAI and Voyage keys
+(checked, then stored in the OS keychain), connects Gmail with an app password (turn on 2-Step
+Verification, create one at https://myaccount.google.com/apppasswords, enable IMAP), asks a
+little about you, and runs the first read of your mail.
+
+### The interface
+
+- **Streaming chat.** Answers stream token by token through a smoother that reveals whole words
+  at an even pace, so bursty network delivery never looks jittery.
+- **Thinking you can see.** While the agent works, a glimmering label says what it is actually
+  doing ("Searching your mail for “netflix”", "Adding up your bills"). Finished answers keep a
+  "Thought for 6s · …" disclosure with the reasoning summary.
+- **Grounded answers.** Citations are numbered chips; hover to see the email. A sources row
+  closes each answer.
+- **Your approval to send.** Drafts appear as a card with Send and Discard. Nothing goes out
+  otherwise.
+- **Pebble.** A small stone-like character above the chat. It reacts to what you type (money,
+  urgency, greetings, writing, memory) and to what the agent is doing (scanning while it
+  searches, counting while it adds up, looking at the card while it waits for you), and follows
+  your pointer when idle. It respects reduced-motion settings.
+
+The CLI below remains for development and administration.
+
+## Setup without the UI
+
+```bash
 uv run email-agent db migrate
 uv run email-agent setup        # API keys → Gmail → your profile → first ingest (resumable)
 uv run email-agent worker       # keep running: new mail, retries, nightly dreaming
 ```
 
 `setup` checks each API key with a cheap call and stores it in the OS keychain. Environment
-variables (`.env`) still take precedence. For Gmail it asks for an app password: turn on
-2-Step Verification, create one at https://myaccount.google.com/apppasswords, and make sure
-IMAP is enabled. Your profile (name, timezone, one line about you) is the only thing that goes
-into every conversation's system prompt. Edit it with `email-agent profile`.
+variables (`.env`) still take precedence. Your profile (name, timezone, one line about you) is
+the only thing that goes into every conversation's system prompt; edit it with
+`email-agent profile`.
 
 ## Ingest and keep up to date
 
@@ -166,7 +196,11 @@ only see `Agent.run`'s event stream, so the internals can change without touchin
 ## Development
 
 ```bash
-uv run pytest                           # offline: fake OpenAI/Voyage/IMAP, real Postgres (email_agent_test DB)
+uv run pytest                           # backend: fake OpenAI/Voyage/IMAP, real Postgres (email_agent_test DB)
+(cd web && npm test)                    # frontend: SSE parser, smoother, Pebble mood engine
+uv run email-agent app --no-browser     # API on :8765, then in another terminal:
+(cd web && npm run dev)                 # UI with hot reload on :5173 (proxies /api); #pebbles shows every mood
+node scripts/drive.mjs <dir> "ask:<question>"   # drive the running app in Chrome and save screenshots
 uv run email-agent search "netflix" --mode bm25|vector|hybrid [--no-rerank]
 uv run email-agent eval-retrieval       # recall@10 / MRR per mode; see evals/retrieval_golden.example.yaml
 ```

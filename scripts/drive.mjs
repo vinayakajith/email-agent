@@ -50,5 +50,26 @@ if (scenario === "profile") {
     await shot("citation-hover");
   }
 }
+if (scenario.startsWith("approval:")) {
+  // Ends by clicking Discard: nothing is ever sent by this scenario.
+  await page.click(".icon-button[aria-label='Conversations']");
+  await page.waitForTimeout(500);
+  await shot("drawer");
+  await page.click(".drawer-new");
+  await page.waitForTimeout(500);
+  await page.fill(".composer textarea", scenario.slice(9));
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".approval", { timeout: 120000 });
+  await page.waitForTimeout(1500);
+  await shot("approval");
+  await page.click(".approval .button.quiet");
+  await page.waitForTimeout(1200);
+  await shot("discarded");
+}
+if (scenario === "mobile") {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(800);
+  await shot("mobile");
+}
 await browser.close();
 console.log(logs.join("\n") || "no console errors");
