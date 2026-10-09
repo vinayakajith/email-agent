@@ -16,7 +16,10 @@ async def _configure(conn: AsyncConnection) -> None:
     except Exception:
         # Before migration 001 the vector type does not exist yet.
         pass
+    # Autocommit first: configure must leave the connection idle, not inside a transaction.
     await conn.set_autocommit(True)
+    # Date filters ("this month") are interpreted in the user's local timezone.
+    await conn.execute("SELECT set_config('TimeZone', %s, false)", (get_settings().tz,))
 
 
 async def get_pool() -> AsyncConnectionPool:

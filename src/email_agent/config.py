@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,10 +28,21 @@ class Settings(BaseSettings):
     gmail_address: str = ""
     gmail_app_password: str = ""
 
+    # IANA name used for "this month" / date filters; detected from the OS when empty.
+    timezone: str = ""
     enrich_concurrency: int = 8
     # Passed as reasoning.effort to the enrich model; empty string disables it for non-reasoning models.
     enrich_reasoning_effort: str = "low"
     agent_max_steps: int = 15
+    # Passed as reasoning.effort to the agent model; empty string disables it.
+    agent_reasoning_effort: str = "medium"
+
+    @property
+    def tz(self) -> str:
+        if self.timezone:
+            return self.timezone
+        target = os.path.realpath("/etc/localtime")
+        return target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else "UTC"
 
 
 @lru_cache

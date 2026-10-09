@@ -198,6 +198,115 @@ def search(
     console.print(table)
 
 
+def _summarize_observation(result: dict) -> str:
+    from rich.markup import escape
+
+    if "error" in result:
+        return f"[red]error: {escape(str(result['error']))}[/]"
+    for key in ("results", "emails", "line_items", "messages", "paid_services"):
+        if key in result:
+            extra = f", totals {result['totals_by_currency']}" if "totals_by_currency" in result else ""
+            return f"{len(result[key])} {key.replace('_', ' ')}{extra}"
+    if "subject" in result:
+        return f"read: {result['subject']}"
+    return "ok"
+
+
+async def _confirm_draft(draft: dict) -> bool:
+    from rich.panel import Panel
+
+    lines = [f"[bold]To:[/] {', '.join(draft['to'])}"]
+    if draft.get("cc"):
+        lines.append(f"[bold]Cc:[/] {', '.join(draft['cc'])}")
+    lines += [f"[bold]Subject:[/] {draft['subject']}", "", draft["body"]]
+    console.print(Panel("\n".join(lines), title="Send this email?", border_style="yellow"))
+    return await asyncio.to_thread(typer.confirm, "Send it", default=False)
+
+
+async def _render_turn(agent, question: str, verbose: bool) -> None:
+    from rich.markdown import Markdown
+    from rich.markup import escape
+
+    from email_agent.agent.events import ConfirmationRequired, FinalAnswer, Observation, Thought, ToolCall
+    from email_agent.db.pool import connection
+
+    status = console.status("Thinking...")
+    status.start()
+    try:
+        async for event in agent.run(question):
+            if isinstance(event, ConfirmationRequired):
+                status.stop()  # the confirmation prompt needs a clean terminal
+                continue
+            if isinstance(event, Thought):
+                console.print(f"[dim italic]thought: {escape(event.text)}[/]")
+            elif isinstance(event, ToolCall):
+                args = ", ".join(f"{k}={v!r}" for k, v in event.arguments.items() if v is not None)
+                console.print(f"[cyan]-> {event.name}({escape(args)})[/]")
+            elif isinstance(event, Observation):
+                console.print(f"[dim]<- {event.name}: {_summarize_observation(event.result)}[/]")
+                if verbose:
+                    console.print_json(data=event.result)
+            elif isinstance(event, FinalAnswer):
+                status.stop()
+                console.print()
+                console.print(Markdown(event.text))
+                if event.cited_email_ids:
+                    async with connection() as conn:
+                        rows = await (await conn.execute(
+                            "SELECT id, subject, from_name, from_addr, sent_at FROM emails WHERE id = ANY(%s) ORDER BY id",
+                            (event.cited_email_ids,),
+                        )).fetchall()
+                    console.print("\n[bold]Sources[/]")
+                    for r in rows:
+                        when = f"{r['sent_at']:%Y-%m-%d}" if r["sent_at"] else ""
+                        line = f"  [#{r['id']}] {r['subject']} — {r['from_name'] or r['from_addr']}, {when}"
+                        console.print(escape(line))
+                console.print(f"[dim]{event.steps} steps · {event.input_tokens:,} in / {event.output_tokens:,} out tokens[/]")
+            if not isinstance(event, FinalAnswer):
+                status.start()
+    finally:
+        status.stop()
+
+
+@app.command()
+def ask(
+    question: str,
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print full tool observations"),
+    account: str = typer.Option(None, help="Account email if several are connected"),
+) -> None:
+    """Ask one question about your mailbox."""
+    from email_agent.accounts import get_account
+    from email_agent.agent.loop import Agent
+
+    async def main():
+        agent = Agent(await get_account(account), confirm=_confirm_draft)
+        await _render_turn(agent, question, verbose)
+
+    _run(main())
+
+
+@app.command()
+def chat(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print full tool observations"),
+    account: str = typer.Option(None, help="Account email if several are connected"),
+) -> None:
+    """Multi-turn conversation with the agent. Type 'exit' to quit."""
+    from email_agent.accounts import get_account
+    from email_agent.agent.loop import Agent
+
+    async def main():
+        agent = Agent(await get_account(account), confirm=_confirm_draft)
+        console.print(f"Chatting about [bold]{agent.account.email}[/]. Type 'exit' to quit.")
+        while True:
+            question = (await asyncio.to_thread(console.input, "\n[bold green]you>[/] ")).strip()
+            if question.lower() in {"exit", "quit", ":q"}:
+                return
+            if question:
+                await _render_turn(agent, question, verbose)
+
+    _run(main())
+
+
 @app.command()
 def status(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
     """Show ingestion progress and sync state."""
