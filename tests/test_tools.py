@@ -31,26 +31,60 @@ async def test_aggregate_spend_separates_currencies(ingested):
     assert res["totals_by_currency"] == {"INR": 12450.0, "USD": 42.17}
     assert {g["merchant"] for g in res["groups"]} == {"HDFC Bank", "AWS"}
     card = await run(ingested, "aggregate_spend", kind="credit_card_bill", date_from="2026-10-01", date_to="2026-10-31")
-    assert card["totals_by_currency"] == {"INR": 12450.0} and card["count"] == 1
+    assert card["totals_by_currency"] == {"INR": 12450.0} and card["distinct_items"] == 1
+    # Counted by due date (Oct 20), so it is not a September bill.
     sept = await run(ingested, "aggregate_spend", kind="credit_card_bill", date_from="2026-09-01", date_to="2026-09-30")
-    assert sept["count"] == 0
+    assert sept["distinct_items"] == 0
 
 
-async def test_aggregate_spend_flags_duplicate_reminders(ingested):
+async def _add_bill(account, gm_msgid, sent, merchant, amount, due, sender="protect@cred.club"):
     async with connection() as conn:
         await conn.execute(
             """INSERT INTO emails (account_id, gm_msgid, subject, from_addr, sent_at, stage)
-               VALUES (%s, 999, 'Reminder: card payment due', 'alerts@hdfcbank.net', '2026-10-05', 'embedded')""",
-            (ingested.id,),
+               VALUES (%s, %s, 'Your credit card bill is due', %s, %s, 'embedded')""",
+            (account.id, gm_msgid, sender, sent),
         )
         await conn.execute(
-            """INSERT INTO email_facts (email_id, category, amount, amount_type, currency, merchant, is_credit_card_bill, model)
-               SELECT id, 'bill', 12450, 'amount_due', 'INR', 'HDFC Bank', true, 'test' FROM emails WHERE gm_msgid = 999"""
+            """INSERT INTO email_facts (email_id, category, amount, amount_type, currency, merchant, due_date,
+                                        is_credit_card_bill, model)
+               SELECT id, 'bill', %s, 'amount_due', 'INR', %s, %s, true, 'test' FROM emails WHERE gm_msgid = %s""",
+            (amount, merchant, due, gm_msgid),
         )
+
+
+async def test_repeated_bill_reminders_merge_into_one_bill(ingested):
+    # Real-world pattern: a statement plus app reminders spread over 2+ weeks, same due date.
+    for i, sent in enumerate(["2026-09-17", "2026-09-17", "2026-09-30", "2026-10-02"]):
+        await _add_bill(ingested, 100 + i, sent, "ICICI Bank", 71407.09, "2026-10-04")
+    # Partial payment: the amount drops between reminders for the same due date.
+    await _add_bill(ingested, 200, "2026-09-16", "Axis Bank", 44108.78, "2026-10-05")
+    await _add_bill(ingested, 201, "2026-10-01", "Axis Bank", 37215.78, "2026-10-05")
+    # Due in late September: outside October even though reminders keep arriving.
+    await _add_bill(ingested, 300, "2026-09-19", "Kotak Mahindra Bank", 10623.66, "2026-09-23")
+
     res = await run(ingested, "aggregate_spend", kind="credit_card_bill", date_from="2026-10-01", date_to="2026-10-31")
-    assert res["totals_by_currency"] == {"INR": 24900.0}
-    assert res["totals_excluding_possible_duplicates"] == {"INR": 12450.0}
-    assert "possible_duplicate_of" in res["line_items"][1]
+    items = {i["merchant"]: i for i in res["line_items"]}
+    assert set(items) == {"ICICI Bank", "Axis Bank", "HDFC Bank"}
+    assert len(items["ICICI Bank"]["email_ids"]) == 4
+    assert items["Axis Bank"]["amount"] == 37215.78 and items["Axis Bank"]["earlier_amounts"] == [44108.78]
+    assert res["totals_by_currency"] == {"INR": round(71407.09 + 37215.78 + 12450.0, 2)}
+    assert res["emails_considered"] == 7 and res["distinct_items"] == 3
+    assert "note_on_amounts" in res
+
+
+def test_merge_without_due_date_uses_amount_window():
+    from datetime import date
+    from decimal import Decimal
+
+    from email_agent.agent.tools import merge_repeats
+
+    def item(eid, d, amount):
+        return {"email_id": eid, "date": date.fromisoformat(d), "merchant": "Netflix", "amount": Decimal(amount),
+                "currency": "USD", "due_date": None, "subject": "s"}
+
+    merged = merge_repeats([item(1, "2026-09-01", "15.49"), item(2, "2026-09-05", "15.49"),
+                            item(3, "2026-10-01", "15.49")], bills=False)
+    assert [m["email_ids"] for m in merged] == [[1, 2], [3]]  # monthly charges stay separate
 
 
 async def test_list_subscriptions(ingested):

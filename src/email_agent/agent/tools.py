@@ -101,9 +101,10 @@ TOOL_SCHEMAS = [
     ),
     _fn(
         "aggregate_spend",
-        "Exact totals of money amounts extracted from emails, by email date. Always use this for "
-        "totals instead of adding numbers yourself. Totals are per currency. Line items include "
-        "email ids and flag likely duplicates (e.g. a statement and its reminder) for you to check.",
+        "Exact totals of money amounts extracted from emails. Always use this for totals instead of "
+        "adding numbers yourself. Totals are per currency. Repeated emails about the same bill "
+        "(statement, reminders, 'pay now' nudges from apps like CRED) are merged into one line item "
+        "using the latest amount; each line item lists all its email ids.",
         {
             "kind": {
                 "type": "string",
@@ -113,6 +114,12 @@ TOOL_SCHEMAS = [
             },
             "date_from": DATE,
             "date_to": {**DATE, "description": "YYYY-MM-DD, inclusive"},
+            "date_basis": {
+                "type": "string",
+                "enum": ["due_date", "email_date"],
+                "description": "Which date must fall in the range. Default: due_date for bills (falls back "
+                "to email date when a bill has no due date), email_date for everything else.",
+            },
             "group_by": {"type": "string", "enum": ["merchant", "month"]},
             "merchant": {"type": "string", "description": "Substring filter on merchant name."},
         },
@@ -301,53 +308,101 @@ SPEND_KIND_SQL = {
 }
 
 
-async def aggregate_spend(ctx: ToolContext, kind, date_from, date_to, group_by=None, merchant=None):
+BILL_KINDS = {"credit_card_bill", "bill"}
+# Without a due date, the same merchant + amount within this window is treated as one bill.
+SAME_BILL_WINDOW_DAYS = {"bill": 35, "other": 10}
+
+
+def merge_repeats(items: list[dict], bills: bool) -> list[dict]:
+    """Collapse repeated emails about the same charge into one line item.
+
+    Bills with a due date are keyed on (merchant, currency, due date): every reminder for that
+    statement merges, and the amount is the latest one (it drops after partial payments).
+    Anything else merges when merchant, currency and amount repeat within a short window.
+    """
+    window = SAME_BILL_WINDOW_DAYS["bill" if bills else "other"]
+    merged: list[dict] = []
+    by_due: dict[tuple, dict] = {}
+    for it in sorted(items, key=lambda i: (i["date"], i["email_id"])):
+        merchant = it["merchant"].strip().lower()
+        target = None
+        if bills and it["due_date"]:
+            target = by_due.get((merchant, it["currency"], it["due_date"]))
+        else:
+            for m in reversed(merged):
+                if (
+                    m["_merchant"] == merchant and m["currency"] == it["currency"] and m["amount"] == it["amount"]
+                    and not m.get("due_date") and (it["date"] - m["last_email_date"]).days <= window
+                ):
+                    target = m
+                    break
+        if target is None:
+            target = {
+                "_merchant": merchant, "merchant": it["merchant"], "amount": it["amount"], "currency": it["currency"],
+                "due_date": it["due_date"], "first_email_date": it["date"], "last_email_date": it["date"],
+                "latest_email_id": it["email_id"], "email_ids": [it["email_id"]], "subject": it["subject"],
+            }
+            merged.append(target)
+            if bills and it["due_date"]:
+                by_due[(merchant, it["currency"], it["due_date"])] = target
+            continue
+        if it["amount"] != target["amount"]:
+            target.setdefault("earlier_amounts", []).append(target["amount"])
+            target["amount"] = it["amount"]
+        target["email_ids"].append(it["email_id"])
+        target["latest_email_id"] = it["email_id"]
+        target["last_email_date"] = it["date"]
+        target["subject"] = it["subject"]
+    for m in merged:
+        del m["_merchant"]
+    return merged
+
+
+async def aggregate_spend(ctx: ToolContext, kind, date_from, date_to, date_basis=None, group_by=None, merchant=None):
+    bills = kind in BILL_KINDS
+    basis = date_basis or ("due_date" if bills else "email_date")
+    date_expr = "COALESCE(f.due_date, e.sent_at::date)" if basis == "due_date" else "e.sent_at::date"
     where = [
-        "e.account_id = %s", "f.amount IS NOT NULL", SPEND_KIND_SQL[kind], "e.sent_at >= %s", "e.sent_at < %s",
+        "e.account_id = %s", "f.amount IS NOT NULL", SPEND_KIND_SQL[kind],
+        f"{date_expr} >= %s", f"{date_expr} <= %s",
     ]
-    params: list = [ctx.account.id, _date(date_from), _date(date_to) + timedelta(days=1)]
+    params: list = [ctx.account.id, _date(date_from), _date(date_to)]
     if merchant:
         where.append("f.merchant ILIKE %s")
         params.append(f"%{merchant}%")
     async with connection() as conn:
-        items = await (await conn.execute(
+        rows = await (await conn.execute(
             f"""SELECT e.id AS email_id, e.sent_at::date AS date, COALESCE(f.merchant, e.from_addr) AS merchant,
                        f.amount, COALESCE(f.currency, '???') AS currency, f.due_date, e.subject
                 FROM emails e JOIN email_facts f ON f.email_id = e.id
-                WHERE {' AND '.join(where)} ORDER BY e.sent_at""",
+                WHERE {' AND '.join(where)}""",
             params,
         )).fetchall()
-    # Same merchant + amount + currency within 10 days is very likely one bill mailed twice.
-    for i, it in enumerate(items):
-        for prev in items[:i]:
-            if (
-                prev["merchant"].lower() == it["merchant"].lower()
-                and prev["amount"] == it["amount"]
-                and prev["currency"] == it["currency"]
-                and abs((it["date"] - prev["date"]).days) <= 10
-            ):
-                it["possible_duplicate_of"] = prev["email_id"]
-                break
+    items = merge_repeats(rows, bills)
     totals: dict[str, Decimal] = {}
     groups: dict[tuple[str, str], Decimal] = {}
     for it in items:
         totals[it["currency"]] = totals.get(it["currency"], Decimal(0)) + it["amount"]
         if group_by:
-            key = it["merchant"] if group_by == "merchant" else f"{it['date']:%Y-%m}"
+            when = it["due_date"] or it["first_email_date"]
+            key = it["merchant"] if group_by == "merchant" else f"{when:%Y-%m}"
             groups[(key, it["currency"])] = groups.get((key, it["currency"]), Decimal(0)) + it["amount"]
-    dupes = [it for it in items if "possible_duplicate_of" in it]
     result = {
         "kind": kind,
         "period": f"{date_from} to {date_to}",
-        "count": len(items),
+        "date_basis": basis,
+        "distinct_items": len(items),
+        "emails_considered": len(rows),
         "totals_by_currency": {c: float(v) for c, v in totals.items()},
-        "line_items": [_clean(it) for it in items[:60]],
+        "line_items": [_clean({**it, "amount": float(it["amount"]),
+                               "earlier_amounts": [float(a) for a in it.get("earlier_amounts", [])]})
+                       for it in items[:60]],
     }
-    if dupes:
-        result["totals_excluding_possible_duplicates"] = {
-            c: float(v - sum((d["amount"] for d in dupes if d["currency"] == c), Decimal(0)))
-            for c, v in totals.items()
-        }
+    if any("earlier_amounts" in it for it in items):
+        result["note_on_amounts"] = (
+            "Some bills changed amount across emails (often a partial payment, or two cards from the same "
+            "issuer sharing a due date); the latest amount is used. Check with get_email if it matters."
+        )
     if group_by:
         result["groups"] = [
             {group_by: k, "currency": c, "total": float(v)} for (k, c), v in sorted(groups.items(), key=lambda kv: -kv[1])

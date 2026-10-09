@@ -160,7 +160,8 @@ def resume(account: str = typer.Option(None, help="Account email if several are 
             tasks: dict[str, int] = {}
 
             def progress(stage: str, done: int, total: int) -> None:
-                tasks.setdefault(stage, bar.add_task(stage, total=total))
+                if stage not in tasks:
+                    tasks[stage] = bar.add_task(stage, total=total)
                 bar.update(tasks[stage], completed=done, total=total)
 
             try:
@@ -187,7 +188,8 @@ def sync(account: str = typer.Option(None, help="Account email if several are co
             tasks: dict[str, int] = {}
 
             def progress(stage: str, done: int, total: int) -> None:
-                tasks.setdefault(stage, bar.add_task(stage, total=total))
+                if stage not in tasks:
+                    tasks[stage] = bar.add_task(stage, total=total)
                 bar.update(tasks[stage], completed=done, total=total)
 
             return await run_sync(acct, progress)
