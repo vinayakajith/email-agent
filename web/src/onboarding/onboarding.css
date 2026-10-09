@@ -1,0 +1,111 @@
+.onboarding {
+  min-height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 20px;
+  padding: 48px 20px;
+}
+
+.onboarding-card {
+  width: min(440px, 100%);
+  display: grid;
+  gap: 16px;
+}
+
+.onboarding-card h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.onboarding-card p {
+  margin: 0;
+}
+
+.onboarding-card > .button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.onboarding-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.onboarding-form .button {
+  justify-self: start;
+  margin-top: 4px;
+  min-width: 128px;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+
+.form-error {
+  color: var(--ember);
+  font-size: 14px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 4px;
+  border-radius: 14px;
+  background: var(--paper-sunk);
+  gap: 4px;
+}
+
+.segmented button {
+  height: 38px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-2);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.segmented button.active {
+  background: var(--paper-raised);
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+.sync {
+  display: grid;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.sync-label {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 500;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.sync-bar {
+  height: 3px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.sync-fill {
+  height: 100%;
+  background: var(--ember);
+  border-radius: 3px;
+}

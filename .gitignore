@@ -8,3 +8,5 @@ data/
 .DS_Store
 evals/retrieval_golden.yaml
 logs/
+web/node_modules/
+web/dist/

@@ -1,0 +1,9 @@
+.pebble {
+  flex: none;
+  user-select: none;
+}
+
+.pebble svg {
+  display: block;
+  overflow: visible;
+}

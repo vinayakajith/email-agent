@@ -1,0 +1,59 @@
+/* Design tokens. Calm, editorial, tactile: warm paper and ink, one living accent. */
+:root {
+  --paper: #f5f2ec;
+  --paper-raised: #fbf9f5;
+  --paper-sunk: #ece8e0;
+  --ink: #17160f;
+  --ink-2: #57544b;
+  --ink-3: #8f8b81;
+  --line: rgb(23 22 15 / 0.09);
+  --line-strong: rgb(23 22 15 / 0.16);
+
+  /* The only accent: reserved for things that are alive (thinking light, active state). */
+  --ember: #df5f27;
+  --ember-soft: rgb(223 95 39 / 0.12);
+
+  /* Pebble */
+  --stone: #ddd6ca;
+  --stone-light: #ebe6dd;
+  --stone-shade: #c9c0b2;
+  --pebble-eye: #17160f;
+
+  /* Glimmer: muted text with a moving band of full ink */
+  --glimmer-base: var(--ink-3);
+  --glimmer-band: var(--ink);
+
+  --font-ui: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-read: "Newsreader Variable", ui-serif, Georgia, serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+
+  --r-s: 8px;
+  --r-m: 14px;
+  --r-l: 22px;
+  --shadow-soft: 0 1px 0 rgb(23 22 15 / 0.04), 0 10px 30px -18px rgb(23 22 15 / 0.35);
+  --focus: 0 0 0 2px var(--paper), 0 0 0 4px rgb(23 22 15 / 0.55);
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --column: 720px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #121110;
+    --paper-raised: #1a1917;
+    --paper-sunk: #0d0c0b;
+    --ink: #ece7dd;
+    --ink-2: #a8a296;
+    --ink-3: #6e695f;
+    --line: rgb(236 231 221 / 0.08);
+    --line-strong: rgb(236 231 221 / 0.15);
+    --ember: #f07a45;
+    --ember-soft: rgb(240 122 69 / 0.14);
+    --stone: #34312d;
+    --stone-light: #403c37;
+    --stone-shade: #24221f;
+    --pebble-eye: #f1ece2;
+    --shadow-soft: 0 1px 0 rgb(0 0 0 / 0.3), 0 14px 34px -20px rgb(0 0 0 / 0.8);
+    --focus: 0 0 0 2px var(--paper), 0 0 0 4px rgb(236 231 221 / 0.6);
+  }
+}
