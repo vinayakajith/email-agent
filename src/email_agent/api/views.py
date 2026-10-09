@@ -3,6 +3,7 @@
 Kept free of HTTP details so the web app today and a mobile client later share them.
 """
 
+import json
 import re
 from collections.abc import AsyncIterator
 from datetime import date
@@ -27,6 +28,7 @@ _APPROVAL_NOTE = re.compile(r"^The user (approved|rejected) draft (\d+)")
 async def chat_events(agent: Agent, message: str) -> AsyncIterator[tuple[str, dict]]:
     """Agent events mapped to the small set of stream events clients render."""
     announced = False
+    args_by_call: dict[str, dict] = {}
     try:
         async for ev in agent.run(message):
             if not announced and agent.conversation_id:
@@ -39,9 +41,11 @@ async def chat_events(agent: Agent, message: str) -> AsyncIterator[tuple[str, di
             elif isinstance(ev, ToolStarted):
                 yield "activity", {"tool": ev.name, "label": present.activity_label(ev.name)}
             elif isinstance(ev, ToolCall):
+                args_by_call[ev.call_id] = ev.arguments
                 yield "activity", {"tool": ev.name, "label": present.activity_label(ev.name, ev.arguments)}
             elif isinstance(ev, Observation):
-                yield "step_done", {"tool": ev.name, "label": present.done_label(ev.name), "error": ev.error}
+                label = present.done_label(ev.name, args_by_call.get(ev.call_id))
+                yield "step_done", {"tool": ev.name, "label": label, "error": ev.error}
             elif isinstance(ev, StepPreamble):
                 yield "preamble", {}
             elif isinstance(ev, ConfirmationRequired):
@@ -83,7 +87,11 @@ async def render_conversation(account_id: int, items: list[dict], conversation_i
         elif kind == "function_call":
             if messages and messages[-1]["role"] == "assistant" and messages[-1]["turn"] == turn:
                 messages.pop()  # text right before a tool call was a preamble, not the answer
-            steps.append(present.done_label(item.get("name", "")))
+            try:
+                args = json.loads(item.get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            steps.append(present.done_label(item.get("name", ""), args))
         elif kind == "message" and role == "assistant":
             messages.append({"role": "assistant", "text": _text(item), "steps": list(dict.fromkeys(steps)), "turn": turn})
         elif role == "developer" and (m := _APPROVAL_NOTE.match(_text(item))):

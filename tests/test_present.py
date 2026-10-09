@@ -10,6 +10,8 @@ def test_activity_labels_are_plain_language():
     assert activity_label("draft_email", {"reply_to_email_id": 3}) == "Drafting a reply"
     assert activity_label("unknown_tool") == "Working on it"
     assert done_label("get_email") == "Read an email"
+    assert done_label("aggregate_spend", {"kind": "credit_card_bill"}) == "Added up your bills"
+    assert done_label("search_emails", {"query": "netflix"}) == "Searched for “netflix”"
 
 
 async def test_sources_keep_citation_order_and_scope(ingested):

@@ -58,7 +58,7 @@ export type Draft = { draft_id: number; to: string[]; cc: string[]; subject: str
 
 export type Message =
   | { role: "user"; text: string }
-  | { role: "assistant"; text: string; steps: string[]; sources: Source[] }
+  | { role: "assistant"; text: string; steps: string[]; sources: Source[]; thought?: string; seconds?: number }
   | { role: "note"; text: string; draft_id: number }
   | { role: "approval"; draft: Draft };
 

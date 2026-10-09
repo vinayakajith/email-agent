@@ -8,6 +8,7 @@
   --ink-3: #8f8b81;
   --line: rgb(23 22 15 / 0.09);
   --line-strong: rgb(23 22 15 / 0.16);
+  --bubble: #ebe6dd;
 
   /* The only accent: reserved for things that are alive (thinking light, active state). */
   --ember: #df5f27;
@@ -47,6 +48,7 @@
     --ink-3: #6e695f;
     --line: rgb(236 231 221 / 0.08);
     --line-strong: rgb(236 231 221 / 0.15);
+    --bubble: #23211e;
     --ember: #f07a45;
     --ember-soft: rgb(240 122 69 / 0.14);
     --stone: #34312d;

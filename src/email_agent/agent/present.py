@@ -38,17 +38,22 @@ def activity_label(tool: str, args: dict | None = None) -> str:
             return "Working on it"
 
 
-def done_label(tool: str) -> str:
-    """Past-tense step for the quiet trail under the thinking row."""
+def done_label(tool: str, args: dict | None = None) -> str:
+    """Past-tense step for the quiet trail; mirrors the live activity label."""
+    args = args or {}
+    match tool:
+        case "search_emails":
+            return f"Searched for {_quote(args['query'], 28)}" if args.get("query") else "Searched your mail"
+        case "aggregate_spend":
+            return "Added up your bills" if str(args.get("kind", "")).endswith("bill") else "Added up the amounts"
+        case "draft_email":
+            return "Drafted a reply" if args.get("reply_to_email_id") else "Drafted an email"
     return {
-        "search_emails": "Searched your mail",
         "filter_emails": "Went through your inbox",
         "get_email": "Read an email",
         "get_thread": "Read a conversation",
-        "aggregate_spend": "Added up amounts",
         "list_subscriptions": "Checked subscriptions",
-        "draft_email": "Drafted",
-        "send_email": "Asked for approval",
+        "send_email": "Asked for your approval",
         "get_user_context": "Recalled your context",
         "save_memory": "Saved to memory",
         "delete_memory": "Removed from memory",
