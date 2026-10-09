@@ -2,9 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import { get, type Session } from "./api";
 import { Chat } from "./chat/Chat";
 import { Onboarding } from "./onboarding/Onboarding";
+import { Gallery } from "./pebble/Gallery";
 import { Pebble } from "./pebble/Pebble";
 
 export function App() {
+  if (import.meta.env.DEV && location.hash === "#pebbles") return <Gallery />;
+  return <Main />;
+}
+
+function Main() {
   const [session, setSession] = useState<Session | null>(null);
   const [failed, setFailed] = useState(false);
 

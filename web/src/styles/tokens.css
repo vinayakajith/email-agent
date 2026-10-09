@@ -19,6 +19,7 @@
   --stone-light: #ebe6dd;
   --stone-shade: #c9c0b2;
   --pebble-eye: #17160f;
+  --pebble-sheen: #fffaf0;
 
   /* Glimmer: muted text with a moving band of full ink */
   --glimmer-base: var(--ink-3);
@@ -55,6 +56,7 @@
     --stone-light: #403c37;
     --stone-shade: #24221f;
     --pebble-eye: #f1ece2;
+    --pebble-sheen: #6b645a;
     --shadow-soft: 0 1px 0 rgb(0 0 0 / 0.3), 0 14px 34px -20px rgb(0 0 0 / 0.8);
     --focus: 0 0 0 2px var(--paper), 0 0 0 4px rgb(236 231 221 / 0.6);
   }

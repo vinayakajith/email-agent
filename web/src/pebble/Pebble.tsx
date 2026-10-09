@@ -62,6 +62,27 @@ export function Pebble({ mood, size = 112, talking = false }: Props) {
   moodRef.current = mood;
   talkingRef.current = talking;
   const life = useRef({ nextBlink: 2500, nextGlance: 1800, glance: [0, 0] as [number, number], hopUntil: 0 });
+  const root = useRef<HTMLDivElement>(null);
+  const pointer = useRef<[number, number] | null>(null);
+
+  // When idle, Pebble notices a nearby pointer and looks at it.
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const r = root.current?.getBoundingClientRect();
+      if (!r) return;
+      const dx = e.clientX - (r.left + r.width / 2);
+      const dy = e.clientY - (r.top + r.height / 2);
+      const clamp = (v: number) => Math.max(-1, Math.min(1, v));
+      pointer.current = Math.hypot(dx, dy) < 340 ? [clamp(dx / 170), clamp(dy / 170)] : null;
+    };
+    const onLeave = () => (pointer.current = null);
+    window.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerleave", onLeave);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerleave", onLeave);
+    };
+  }, []);
 
   // A little hop when Pebble becomes warm or happy.
   useEffect(() => {
@@ -100,6 +121,10 @@ export function Pebble({ mood, size = 112, talking = false }: Props) {
     let tiltExtra = 0;
     switch (moodRef.current) {
       case "idle":
+        if (pointer.current) {
+          [gx, gy] = pointer.current;
+          break;
+        }
         if (t > L.nextGlance) {
           L.glance = Math.random() < 0.45 ? [0, 0] : [(Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 0.6];
           L.nextGlance = t + 1800 + Math.random() * 3200;
@@ -142,16 +167,19 @@ export function Pebble({ mood, size = 112, talking = false }: Props) {
   );
   const eyeH = useTransform(() => Math.max(1.2, 15 * eyeOpen.get() * blink.get()));
   const eyeY = useTransform(() => 58 + gazeY.get() * 4.5 - eyeH.get() / 2);
-  const leftX = useTransform(() => 44 + gazeX.get() * 5.5 - 3.5);
-  const rightX = useTransform(() => 69 + gazeX.get() * 5.5 - 3.5);
+  // Narrowed eyes also widen a little, so focus reads as a squint rather than beads.
+  const eyeW = useTransform(() => 7 + Math.max(0, 1 - eyeOpen.get()) * 7);
+  const leftX = useTransform(() => 44 + gazeX.get() * 5.5 - eyeW.get() / 2);
+  const rightX = useTransform(() => 69 + gazeX.get() * 5.5 - eyeW.get() / 2);
+  const eyeR = useTransform(() => Math.min(eyeW.get(), eyeH.get()) / 2);
   const capsuleOpacity = useTransform(() => 1 - arc.get());
   const arcLeft = useTransform(() => arcPath(47.5 + gazeX.get() * 5, 60 + gazeY.get() * 3));
   const arcRight = useTransform(() => arcPath(72.5 + gazeX.get() * 5, 60 + gazeY.get() * 3));
-  const lightX = useTransform(() => 20 + sweep.get() * 80);
-  const lightOpacity = useTransform(() => light.get() * 0.55);
+  const lightX = useTransform(() => -30 + sweep.get() * 120);
+  const lightOpacity = useTransform(() => light.get() * 0.85);
 
   return (
-    <div className="pebble" style={{ width: size, height: size }} aria-hidden="true">
+    <div ref={root} className="pebble" style={{ width: size, height: size }} aria-hidden="true">
       <svg viewBox="0 0 120 120" width={size} height={size}>
         <defs>
           <radialGradient id={`body-${uid}`} cx="38%" cy="30%" r="80%">
@@ -159,10 +187,11 @@ export function Pebble({ mood, size = 112, talking = false }: Props) {
             <stop offset="55%" stopColor="var(--stone)" />
             <stop offset="100%" stopColor="var(--stone-shade)" />
           </radialGradient>
-          <radialGradient id={`light-${uid}`}>
-            <stop offset="0%" stopColor="var(--ember)" stopOpacity="0.9" />
-            <stop offset="100%" stopColor="var(--ember)" stopOpacity="0" />
-          </radialGradient>
+          <linearGradient id={`sheen-${uid}`} x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0%" stopColor="var(--pebble-sheen)" stopOpacity="0" />
+            <stop offset="50%" stopColor="var(--pebble-sheen)" stopOpacity="1" />
+            <stop offset="100%" stopColor="var(--pebble-sheen)" stopOpacity="0" />
+          </linearGradient>
           <radialGradient id={`shadow-${uid}`}>
             <stop offset="0%" stopColor="var(--ink)" stopOpacity="0.16" />
             <stop offset="100%" stopColor="var(--ink)" stopOpacity="0" />
@@ -175,11 +204,13 @@ export function Pebble({ mood, size = 112, talking = false }: Props) {
         <motion.g transform={transform}>
           <motion.path d={d} fill={`url(#body-${uid})`} />
           <g clipPath={`url(#clip-${uid})`}>
-            <motion.ellipse cx={lightX} cy="70" rx="26" ry="34" fill={`url(#light-${uid})`} opacity={lightOpacity} />
+            {/* Thinking: a band of light passing over the stone, in step with the text glimmer. */}
+            <motion.rect x={lightX} y="10" width="34" height="110" fill={`url(#sheen-${uid})`} opacity={lightOpacity}
+              transform="rotate(18 60 66)" />
           </g>
           <motion.g opacity={capsuleOpacity} fill="var(--pebble-eye)">
-            <motion.rect x={leftX} y={eyeY} width="7" height={eyeH} rx="3.5" />
-            <motion.rect x={rightX} y={eyeY} width="7" height={eyeH} rx="3.5" />
+            <motion.rect x={leftX} y={eyeY} width={eyeW} height={eyeH} rx={eyeR} />
+            <motion.rect x={rightX} y={eyeY} width={eyeW} height={eyeH} rx={eyeR} />
           </motion.g>
           <motion.g opacity={arc} stroke="var(--pebble-eye)" strokeWidth="3.4" strokeLinecap="round" fill="none">
             <motion.path d={arcLeft} />

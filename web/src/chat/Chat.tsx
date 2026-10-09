@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { get, type Session, type Status } from "../api";
+import { moodOf } from "../pebble/mood";
 import type { Mood } from "../pebble/moods";
 import { Pebble } from "../pebble/Pebble";
 import { Answer } from "./Answer";
@@ -49,7 +50,7 @@ export function Chat({ session }: { session: Session }) {
   }, [chat]);
 
   const empty = !chat.loading && chat.messages.length === 0 && !chat.turn;
-  const mood = moodFor(chat.turn, draft);
+  const mood = usePebbleMood(chat, draft);
   const name = session.profile?.name;
 
   return (
@@ -173,12 +174,37 @@ function greeting(): string {
   return h < 5 ? "Up late" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
 }
 
-/** Placeholder mapping; the full mood engine (typing intent, tool activity) replaces this. */
-function moodFor(turn: Turn | null, draft: string): Mood {
-  if (turn) {
-    if (turn.phase === "error") return "sad";
-    if (turn.phase === "answering") return "answering";
-    if (turn.phase === "thinking") return turn.tool === "search_emails" ? "searching" : "thinking";
-  }
-  return draft ? "listening" : "idle";
+/** Pebble's mood from the conversation state; time-based beats (settling, recovering) live here. */
+function usePebbleMood(chat: ReturnType<typeof useChat>, draft: string): Mood {
+  const { turn, messages } = chat;
+  const [justFinished, setJustFinished] = useState(false);
+  const [recovered, setRecovered] = useState(false);
+  const wasAnswering = useRef(false);
+
+  useEffect(() => {
+    if (turn?.phase === "answering") wasAnswering.current = true;
+    if (!turn && wasAnswering.current) {
+      wasAnswering.current = false;
+      setJustFinished(true);
+      const t = setTimeout(() => setJustFinished(false), 1600);
+      return () => clearTimeout(t);
+    }
+  }, [turn]);
+
+  useEffect(() => {
+    setRecovered(false);
+    if (turn?.phase !== "error") return;
+    const t = setTimeout(() => setRecovered(true), 2200); // a moment of disappointment, then it recovers
+    return () => clearTimeout(t);
+  }, [turn?.phase]);
+
+  const lastQuestion = [...messages].reverse().find((m) => m.role === "user");
+  return moodOf({
+    turn: !turn || turn.phase === "stopped" ? "none" : turn.phase === "error" ? (recovered ? "none" : "error") : turn.phase,
+    tool: turn?.tool ?? null,
+    draft,
+    awaitingApproval: messages.at(-1)?.role === "approval",
+    justFinished,
+    lastQuestion: lastQuestion?.role === "user" ? lastQuestion.text : "",
+  });
 }
