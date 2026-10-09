@@ -1,0 +1,12 @@
+From: Netflix <info@mailer.netflix.com>
+To: me@gmail.com
+Subject: Your membership has been renewed
+Date: Mon, 15 Sep 2026 18:00:00 +0000
+Message-ID: <nf-1@netflix.com>
+List-Unsubscribe: <mailto:unsub@netflix.com>, <https://www.netflix.com/unsubscribe?id=abc>
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><head><style>p{color:red}</style><script>alert(1)</script></head>
+<body><h1>Thanks for being a member</h1><p>We charged&nbsp;$15.49 for your Standard plan.</p>
+<p><a href="https://www.netflix.com/account">Manage account</a></p></body></html>

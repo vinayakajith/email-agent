@@ -1,0 +1,24 @@
+From: "HDFC Bank" <alerts@hdfcbank.net>
+To: Me <me@gmail.com>
+Subject: Your HDFC Credit Card statement for September 2026
+Date: Thu, 02 Oct 2026 09:15:00 +0530
+Message-ID: <stmt-123@hdfcbank.net>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset="utf-8"
+
+Dear Customer,
+
+Your credit card statement for September 2026 is ready.
+Total amount due: Rs 12,450.00
+Minimum amount due: Rs 620.00
+Payment due date: 20 Oct 2026
+
+Thank you for banking with us.
+--b1
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Dear Customer,</p><p>Your credit card statement for September 2026 is ready.</p><p>Total amount due: <b>Rs 12,450.00</b></p></body></html>
+--b1--
