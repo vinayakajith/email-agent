@@ -2,7 +2,7 @@ import os
 import re
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Fixed for v1: no provider or model switching for retrieval.
@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     log_level: str = ""
     # Passed as reasoning.effort to the agent model.
     agent_reasoning_effort: str = "medium"
+
+    @model_validator(mode="after")
+    def _keys_from_keychain(self) -> "Settings":
+        # Onboarding stores API keys in the OS keychain; the environment still takes precedence.
+        from email_agent import secrets_store
+
+        if not self.openai_api_key:
+            self.openai_api_key = secrets_store.get("openai_api_key") or ""
+        if not self.voyage_api_key:
+            self.voyage_api_key = secrets_store.get("voyage_api_key") or ""
+        return self
 
     @field_validator("openai_model", "openai_enrich_model")
     @classmethod

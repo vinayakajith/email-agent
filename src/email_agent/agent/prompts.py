@@ -26,9 +26,10 @@ Answer format:
 """
 
 
-def system_prompt(owner: str) -> str:
-    """Static per account, so it is part of the cached prefix."""
-    return SYSTEM_PROMPT.format(owner=owner)
+def system_prompt(owner: str, profile_block: str = "") -> str:
+    """Static per account (profile changes only affect new conversations), so it stays cached."""
+    prompt = SYSTEM_PROMPT.format(owner=owner)
+    return f"{prompt}\n{profile_block}\n" if profile_block else prompt
 
 
 def calendar_note(tz: str) -> str:

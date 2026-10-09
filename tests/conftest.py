@@ -1,7 +1,11 @@
 import os
 
 # Tests must not depend on the developer's .env (environment variables take precedence).
-os.environ.update({"OPENAI_MODEL": "gpt-6-luna", "OPENAI_ENRICH_MODEL": "gpt-6-luna", "AGENT_REASONING_EFFORT": "medium"})
+os.environ.update({
+    "OPENAI_MODEL": "gpt-6-luna", "OPENAI_ENRICH_MODEL": "gpt-6-luna", "AGENT_REASONING_EFFORT": "medium",
+    # Never read the developer's keychain from tests.
+    "OPENAI_API_KEY": "test-openai-key", "VOYAGE_API_KEY": "test-voyage-key",
+})
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://email_agent:email_agent@localhost:5434/email_agent_test"
 )
@@ -12,7 +16,10 @@ import pytest  # noqa: E402
 from email_agent.config import get_settings  # noqa: E402
 from email_agent.db.migrate import migrate  # noqa: E402
 
-TABLES = "agent_runs, drafts, conversation_items, conversations, chunks, email_facts, emails, ingest_jobs, sync_state, workers, accounts"
+TABLES = (
+    "agent_runs, drafts, conversation_items, conversations, chunks, email_facts, emails, ingest_jobs, sync_state, "
+    "workers, memory_versions, memories, user_profile, accounts"
+)
 
 
 @pytest.fixture(scope="session")

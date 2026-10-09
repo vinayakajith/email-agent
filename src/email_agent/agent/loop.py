@@ -17,7 +17,7 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalSer
 from psycopg.types.json import Jsonb
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
-from email_agent import conversations
+from email_agent import conversations, profile
 from email_agent.accounts import Account
 from email_agent.agent import tools as agent_tools
 from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, Observation, Thought, ToolCall
@@ -57,9 +57,13 @@ class Agent:
 
     async def _open(self, question: str) -> None:
         """Create, load, or catch up the conversation before a turn."""
+        user = None if self._loaded else await profile.get(self.account.id)
+        if user:
+            self.tz = user.timezone
         if self.conversation_id is None:
             self.conversation_id = await conversations.create(self.account.id, question)
-            self.history = [text_message("developer", system_prompt(self.account.email), breakpoint=True)]
+            prompt = system_prompt(self.account.email, profile.render(user))
+            self.history = [text_message("developer", prompt, breakpoint=True)]
             await conversations.append(self.conversation_id, self.history)
         elif not self._loaded:
             if await conversations.get(self.account.id, self.conversation_id) is None:

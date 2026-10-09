@@ -98,6 +98,89 @@ def connect(
     console.print(f"[green]Connected {account.email}[/]. Password saved to the keychain. Next: `email-agent ingest`.")
 
 
+@app.command()
+def setup() -> None:
+    """Guided onboarding: API keys → Gmail → your profile → first ingest. Resumes where you left off."""
+    from email_agent import onboarding
+    from email_agent.onboarding import OnboardingError
+
+    st = _run(onboarding.status())
+    labels = {"api_keys": "API keys", "gmail": "Gmail", "profile": "Your profile", "first_ingest": "First ingest"}
+    for i, step in enumerate(onboarding.STEPS, start=1):
+        console.print(f"  {i}. {labels[step]}: {'[green]done[/]' if st['steps'][step] else 'to do'}")
+    if st["next"] is None:
+        console.print("[green]Everything is set up.[/]")
+        return
+
+    if not st["steps"]["api_keys"]:
+        console.print("\n[bold]API keys[/] (stored in your keychain; environment variables still take precedence)")
+        while True:
+            openai_key = typer.prompt("OpenAI API key", hide_input=True)
+            voyage_key = typer.prompt("Voyage API key", hide_input=True)
+            try:
+                with console.status("Checking the keys..."):
+                    onboarding.save_api_keys(openai_key, voyage_key)
+                console.print("[green]Keys verified and saved.[/]")
+                break
+            except OnboardingError as e:
+                console.print(f"[red]{e}[/]")
+                if not typer.confirm("Try again?", default=True):
+                    raise typer.Exit(1)
+
+    if not st["steps"]["gmail"]:
+        console.print("\n[bold]Gmail[/]")
+        connect(email=None)
+
+    if not st["steps"]["profile"]:
+        console.print("\n[bold]About you[/] (kept short; it is part of every conversation)")
+        _edit_profile(name=None, timezone=None, about=None)
+
+    if not st["steps"]["first_ingest"]:
+        if st["ingest_running"]:
+            console.print("\nYour first ingest is already running; `email-agent status` shows progress.")
+        else:
+            console.print("\n[bold]First ingest[/]")
+            ingest(since=None, full=False, yes=False, account=None)
+    console.print("\n[green]You're set.[/] Keep `email-agent worker` running for new mail, then try `email-agent chat`.")
+
+
+def _edit_profile(name: str | None, timezone: str | None, about: str | None) -> None:
+    from email_agent import profile
+    from email_agent.accounts import get_account
+    from email_agent.config import get_settings
+
+    async def load():
+        acct = await get_account()
+        return acct, await profile.get(acct.id)
+
+    acct, current = _run(load())
+    while True:
+        name = name or typer.prompt("What should I call you?", default=current.display_name if current else None)
+        timezone = timezone or typer.prompt("Your timezone", default=current.timezone if current else get_settings().tz)
+        if about is None:
+            about = typer.prompt(
+                "Anything I should always know about you? (optional, one line)",
+                default=current.about if current else "", show_default=False,
+            )
+        try:
+            saved = _run(profile.save(acct.id, name, timezone, about))
+            break
+        except profile.ProfileError as e:
+            console.print(f"[red]{e}[/]")
+            name = timezone = about = None
+    console.print(f"[green]Saved.[/] {saved.display_name} · {saved.timezone}" + (f" · {saved.about}" if saved.about else ""))
+
+
+@app.command("profile")
+def profile_cmd(
+    name: str = typer.Option(None),
+    timezone: str = typer.Option(None, help="IANA name, e.g. Asia/Kolkata"),
+    about: str = typer.Option(None, help="One line the assistant should always know"),
+) -> None:
+    """Show or edit your basic profile (applies to new conversations)."""
+    _edit_profile(name, timezone, about)
+
+
 TIME_FRAMES = {"1": ("Last 30 days", 30), "2": ("Last 90 days", 90), "3": ("Last year", 365), "4": ("Custom start date", None), "5": ("Full mailbox", None)}
 # Rough per-email token averages, only for the pre-flight estimate.
 EST_ENRICH_TOKENS, EST_EMBED_TOKENS = 1_000, 700
