@@ -616,22 +616,49 @@ async def _decide_drafts(account, drafts: list[dict]) -> None:
 
 
 async def _render_turn(agent, question: str, verbose: bool) -> None:
+    from rich.live import Live
     from rich.markdown import Markdown
     from rich.markup import escape
 
-    from email_agent.agent.events import ConfirmationRequired, FinalAnswer, Observation, Thought, ToolCall
-    from email_agent.db.pool import connection
+    from email_agent.agent import present
+    from email_agent.agent.events import (
+        ConfirmationRequired,
+        FinalAnswer,
+        Observation,
+        StepPreamble,
+        TextDelta,
+        Thought,
+        ToolCall,
+        ToolStarted,
+    )
 
     status = console.status("Thinking...")
     status.start()
     approvals: list[dict] = []
+    live, buffer = None, ""
     try:
         async for event in agent.run(question):
-            if isinstance(event, ConfirmationRequired):
+            if isinstance(event, TextDelta):
+                if live is None:
+                    status.stop()
+                    live = Live(Markdown(""), console=console, refresh_per_second=15)
+                    live.start()
+                buffer += event.text
+                live.update(Markdown(buffer))
+                continue
+            if isinstance(event, StepPreamble):  # streamed text was a preamble to tool calls
+                live.stop()
+                live, buffer = None, ""
+                status.start()
+                continue
+            if isinstance(event, ToolStarted):
+                status.update(present.activity_label(event.name) + "...")
+            elif isinstance(event, ConfirmationRequired):
                 approvals.append(event.draft)
             elif isinstance(event, Thought):
                 console.print(Markdown(event.text, style="dim italic"))
             elif isinstance(event, ToolCall):
+                status.update(present.activity_label(event.name, event.arguments) + "...")
                 args = ", ".join(f"{k}={v!r}" for k, v in event.arguments.items() if v is not None)
                 console.print(f"[cyan]-> {event.name}({escape(args)})[/]")
             elif isinstance(event, Observation):
@@ -640,19 +667,18 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
                     console.print_json(data=event.result)
             elif isinstance(event, FinalAnswer):
                 status.stop()
-                console.print()
-                console.print(Markdown(event.text))
-                if event.cited_email_ids:
-                    async with connection() as conn:
-                        rows = await (await conn.execute(
-                            "SELECT id, subject, from_name, from_addr, sent_at FROM emails WHERE id = ANY(%s) ORDER BY id",
-                            (event.cited_email_ids,),
-                        )).fetchall()
+                if live is not None:
+                    live.update(Markdown(event.text))
+                    live.stop()
+                    live = None
+                    console.print()
+                else:
+                    console.print()
+                    console.print(Markdown(event.text))
+                if found := await present.sources(agent.account.id, event.cited_email_ids):
                     console.print("\n[bold]Sources[/]")
-                    for r in rows:
-                        when = f"{r['sent_at']:%Y-%m-%d}" if r["sent_at"] else ""
-                        line = f"  [#{r['id']}] {r['subject']} — {r['from_name'] or r['from_addr']}, {when}"
-                        console.print(escape(line))
+                    for src in found:
+                        console.print(escape(f"  [#{src['id']}] {src['subject']} — {src['from']}, {src['date'] or ''}"))
                 hit = event.cached_tokens / event.input_tokens if event.input_tokens else 0
                 console.print(
                     f"[dim]{event.steps} steps · {event.input_tokens:,} in ({event.cached_tokens:,} cached, "
@@ -661,6 +687,8 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
             if not isinstance(event, FinalAnswer):
                 status.start()
     finally:
+        if live is not None:
+            live.stop()
         status.stop()
     if approvals:
         await _decide_drafts(agent.account, approvals)

@@ -47,3 +47,38 @@ class FinalAnswer(Event):
     output_tokens: int = 0
     cached_tokens: int = 0
     cache_write_tokens: int = 0
+
+
+# Streaming events: yielded live to clients, not stored in agent_runs traces.
+
+
+@dataclass
+class TextDelta(Event):
+    step: int
+    text: str
+
+
+@dataclass
+class ThoughtDelta(Event):
+    step: int
+    text: str
+
+
+@dataclass
+class ToolStarted(Event):
+    """A tool call began streaming; its arguments are not complete yet."""
+
+    step: int
+    name: str
+
+
+@dataclass
+class StepPreamble(Event):
+    """Text streamed in this step turned out to precede tool calls: it was a preamble, not the answer."""
+
+    step: int
+
+
+@dataclass
+class AgentError(Event):
+    message: str

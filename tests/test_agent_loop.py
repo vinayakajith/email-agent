@@ -1,4 +1,6 @@
 import copy
+
+import pytest
 import json
 from dataclasses import dataclass, field
 
@@ -60,8 +62,62 @@ class ScriptedClient:
             return Resp([Item("message", text="Forced answer.")])
         return self.script.pop(0) if self.script else self.script_default()
 
+    def stream(self, **kwargs):
+        """Mimics `responses.stream`: errors surface on entry, then deltas, then the final response."""
+        return FakeStream(self, kwargs)
+
     def script_default(self):
         return Resp([Item("function_call", call_id=f"c{len(self.calls)}", name="filter_emails", arguments="{}")])
+
+
+class Ev:
+    def __init__(self, type, **fields):
+        self.type = type
+        self.__dict__.update(fields)
+
+
+def stream_events(resp):
+    for item in resp.output:
+        if item.type == "reasoning":
+            for summ in item.summary:
+                half = len(summ.text) // 2
+                yield Ev("response.reasoning_summary_text.delta", delta=summ.text[:half])
+                yield Ev("response.reasoning_summary_text.delta", delta=summ.text[half:])
+        elif item.type == "function_call":
+            yield Ev("response.output_item.added", item=item)
+        elif item.type == "message":
+            for i in range(0, len(item.text), 5):
+                yield Ev("response.output_text.delta", delta=item.text[i : i + 5])
+
+
+class FakeStream:
+    def __init__(self, client, kwargs):
+        self.client, self.kwargs = client, kwargs
+
+    async def __aenter__(self):
+        self.resp = await self.client.create(**self.kwargs)
+        self.events = list(stream_events(self.resp))
+        if getattr(self.resp, "fail_after_first_delta", False):
+            self.events = self.events[:1] + [None]
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        for ev in self.events:
+            if ev is None:
+                import httpx
+                from openai import APIConnectionError
+
+                raise APIConnectionError(request=httpx.Request("POST", "https://x"))
+            yield ev
+
+    async def get_final_response(self):
+        return self.resp
 
 
 def call(cid, name, **args):
@@ -80,7 +136,8 @@ async def test_react_loop_thought_action_observation_answer(ingested):
     agent = Agent(ingested, client=client)
     events = [e async for e in agent.run("total of my credit card bills this month")]
 
-    kinds = [type(e).__name__ for e in events]
+    live_only = {"TextDelta", "ThoughtDelta", "ToolStarted", "StepPreamble"}
+    kinds = [type(e).__name__ for e in events if type(e).__name__ not in live_only]
     assert kinds == ["Thought", "ToolCall", "ToolCall", "Observation", "Observation", "FinalAnswer"]
     obs = [e for e in events if isinstance(e, Observation)]
     assert obs[0].result["totals_by_currency"] == {"INR": 12450.0}
@@ -215,9 +272,7 @@ async def test_turn_context_reports_mail_not_yet_searchable(ingested):
 async def test_rate_limited_turn_is_retried(ingested, monkeypatch):
     import httpx
     from openai import RateLimitError
-    from tenacity import wait_none
-
-    monkeypatch.setattr(Agent._respond.retry, "wait", wait_none())
+    monkeypatch.setattr("email_agent.agent.loop._retry_delay", lambda attempt: 0)
     client = ScriptedClient([Resp([Item("message", text="answered")])])
     real_create = client.create
     failures = {"n": 2}
@@ -231,3 +286,56 @@ async def test_rate_limited_turn_is_retried(ingested, monkeypatch):
     client.create = flaky
     events = [e async for e in Agent(ingested, client=client).run("q")]
     assert isinstance(events[-1], FinalAnswer) and events[-1].text == "answered"
+
+
+async def test_streams_deltas_live_but_keeps_them_out_of_the_trace(ingested):
+    from email_agent.agent.events import StepPreamble, TextDelta, ThoughtDelta, ToolStarted
+
+    client = ScriptedClient([
+        Resp([Item("reasoning", summary=[Summary("Look at bills.")]), Item("message", text="Let me check."),
+              call("c1", "filter_emails")]),
+        Resp([Item("message", text="All done here.")]),
+    ])
+    events = [e async for e in Agent(ingested, client=client).run("q")]
+    kinds = [type(e).__name__ for e in events]
+    assert kinds.index("ThoughtDelta") < kinds.index("ToolStarted") < kinds.index("StepPreamble") < kinds.index("ToolCall")
+    step2 = "".join(e.text for e in events if isinstance(e, TextDelta) and e.step == 2)
+    assert step2 == "All done here." == events[-1].text
+    assert [e.name for e in events if isinstance(e, ToolStarted)] == ["filter_emails"]
+    assert "".join(e.text for e in events if isinstance(e, ThoughtDelta)) == "Look at bills."
+    async with connection() as conn:
+        stored = (await (await conn.execute("SELECT events FROM agent_runs")).fetchone())["events"]
+    assert not {"TextDelta", "ThoughtDelta", "ToolStarted", "StepPreamble"} & {e["type"] for e in stored}
+
+
+async def test_error_after_streaming_started_is_not_retried(ingested, monkeypatch):
+    from openai import APIConnectionError
+
+    monkeypatch.setattr("email_agent.agent.loop._retry_delay", lambda attempt: 0)
+    resp = Resp([Item("message", text="partial answer")])
+    resp.fail_after_first_delta = True
+    client = ScriptedClient([resp, Resp([Item("message", text="should never be used")])])
+    agent = Agent(ingested, client=client)
+    with pytest.raises(APIConnectionError):
+        [e async for e in agent.run("q")]
+    assert len(client.calls) == 1  # no second request: the client already saw text
+
+
+def test_output_items_are_sent_back_without_sdk_only_fields():
+    from openai.types.responses import ParsedResponseFunctionToolCall
+
+    from email_agent.agent.loop import as_input_item
+
+    item = ParsedResponseFunctionToolCall(
+        type="function_call", call_id="c1", name="get_email", arguments='{"email_id": 1}',
+        parsed_arguments={"email_id": 1}, id="fc_1", status="completed",
+    )
+    out = as_input_item(item)
+    assert "parsed_arguments" not in out and out["arguments"] == '{"email_id": 1}'
+    nested = {"type": "message", "content": [{"type": "output_text", "text": "hi", "parsed": None, "annotations": []}]}
+
+    class M:
+        def model_dump(self, **kw):
+            return nested
+
+    assert as_input_item(M())["content"][0] == {"type": "output_text", "text": "hi", "annotations": []}

@@ -8,25 +8,67 @@ events so the same code drives the CLI now and a streaming UI later.
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 from psycopg.types.json import Jsonb
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 from email_agent import conversations, profile
 from email_agent.accounts import Account
 from email_agent.agent import tools as agent_tools
-from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, Observation, Thought, ToolCall
+from email_agent.agent.events import (
+    ConfirmationRequired,
+    Event,
+    FinalAnswer,
+    Observation,
+    StepPreamble,
+    TextDelta,
+    Thought,
+    ThoughtDelta,
+    ToolCall,
+    ToolStarted,
+)
 from email_agent.agent.prompts import system_prompt, turn_context
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
 from email_agent.prompt_cache import CACHE_OPTIONS, cache_key, text_message, usage_counts
 
 log = logging.getLogger(__name__)
+RETRYABLE = (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)
+MAX_ATTEMPTS = 6
+
+
+def _retry_delay(attempt: int) -> float:
+    return min(20.0, random.uniform(0.5, 1.5) * 2**attempt)
+
+
+# Client-side conveniences the streaming SDK adds to output items; the API rejects them as input.
+_SDK_ONLY_FIELDS = {"parsed_arguments", "parsed"}
+
+
+def _strip(value):
+    if isinstance(value, dict):
+        return {k: _strip(v) for k, v in value.items() if k not in _SDK_ONLY_FIELDS}
+    if isinstance(value, list):
+        return [_strip(v) for v in value]
+    return value
+
+
+def as_input_item(item) -> dict:
+    """An output item as it must be sent back in `input` on the next step."""
+    return _strip(item.model_dump(mode="json", exclude_none=True))
+
+
+@dataclass
+class _StepDone:
+    response: object
+
+
 CITATION_RE = re.compile(r"\[#(\d+)\]")
 
 
@@ -80,21 +122,13 @@ class Agent:
         await conversations.append(self.conversation_id, self.history[self._committed:])
         self._committed = len(self.history)
 
-    # Background ingestion shares the OpenAI rate limits; an interactive turn waits it out
-    # instead of failing.
-    @retry(
-        retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)),
-        wait=wait_random_exponential(min=1, max=20),
-        stop=stop_after_attempt(6),
-        reraise=True,
-    )
-    async def _respond(self, final: bool = False):
+    def _params(self, final: bool) -> dict:
         kwargs = {}
         if self.reasoning:
             kwargs["reasoning"] = self.reasoning
             # Stateless (store=False) multi-step reasoning needs the encrypted reasoning items back.
             kwargs["include"] = ["reasoning.encrypted_content"]
-        return await self.client.responses.create(
+        return dict(
             model=self.model,
             input=self.history,
             prompt_cache_key=cache_key(self.account.id, "agent"),
@@ -105,6 +139,35 @@ class Agent:
             store=False,
             **kwargs,
         )
+
+    async def _stream_step(self, step: int, final: bool) -> AsyncIterator[Event | _StepDone]:
+        """Stream one model call: live deltas, then the completed response as `_StepDone`.
+
+        Background ingestion shares the OpenAI rate limits, so a failure *before* anything was
+        streamed is retried with backoff. After deltas have reached the client, it is not: the
+        same text must never be streamed twice.
+        """
+        for attempt in range(MAX_ATTEMPTS):
+            streamed = False
+            try:
+                async with self.client.responses.stream(**self._params(final)) as stream:
+                    async for ev in stream:
+                        if ev.type == "response.output_text.delta":
+                            streamed = True
+                            yield TextDelta(step, ev.delta)
+                        elif ev.type == "response.reasoning_summary_text.delta":
+                            streamed = True
+                            yield ThoughtDelta(step, ev.delta)
+                        elif ev.type == "response.output_item.added" and ev.item.type == "function_call":
+                            streamed = True
+                            yield ToolStarted(step, ev.item.name)
+                    response = await stream.get_final_response()
+                yield _StepDone(response)
+                return
+            except RETRYABLE:
+                if streamed or attempt == MAX_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(_retry_delay(attempt))
 
     async def run(self, question: str) -> AsyncIterator[Event]:
         started = time.monotonic()
@@ -123,10 +186,17 @@ class Agent:
         try:
             for step in range(1, self.max_steps + 2):
                 final = step > self.max_steps  # budget spent: force an answer without tools
-                resp = await self._respond(final=final)
+                resp = None
+                streamed_text = False
+                async for item in self._stream_step(step, final):
+                    if isinstance(item, _StepDone):
+                        resp = item.response
+                    else:
+                        streamed_text |= isinstance(item, TextDelta)
+                        yield item  # live only; deltas are not stored in the trace
                 for k, v in usage_counts(resp.usage).items():
                     usage[k] += v
-                self.history.extend(item.model_dump(mode="json", exclude_none=True) for item in resp.output)
+                self.history.extend(as_input_item(item) for item in resp.output)
 
                 calls = [item for item in resp.output if item.type == "function_call"]
                 for item in resp.output:
@@ -136,6 +206,8 @@ class Agent:
                             yield emit(Thought(step, text))
                 # Text emitted alongside tool calls is a preamble, i.e. part of the reasoning trace.
                 if calls and resp.output_text.strip():
+                    if streamed_text:
+                        yield StepPreamble(step)
                     yield emit(Thought(step, resp.output_text.strip()))
 
                 if not calls:
