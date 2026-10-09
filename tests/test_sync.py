@@ -24,14 +24,17 @@ def fakes(monkeypatch):
 
 
 async def test_sync_fetches_only_new_mail_and_refreshes_flags(ingested, monkeypatch):
-    with pytest.raises(RuntimeError):
-        await pipeline.run_sync(replace(ingested, id=999))  # never ingested
+    from email_agent import jobs
+
+    with pytest.raises(jobs.PermanentJobError):
+        await pipeline.run_sync(replace(ingested, id=999), 0)  # never ingested
+    job_id = await jobs.enqueue(ingested.id, "sync")
 
     new_uid = max(MAILBOX) + 1
     monkeypatch.setitem(MAILBOX, new_uid, replace(MAILBOX[1], uid=new_uid, gm_msgid=9999, flags=[], raw=NEW_MAIL))
     monkeypatch.setitem(MAILBOX, 2, replace(MAILBOX[2], flags=["\\Seen", "\\Flagged"]))  # read + starred in Gmail
 
-    fetched, refreshed = await pipeline.run_sync(ingested)
+    fetched, refreshed = await pipeline.run_sync(ingested, job_id)
     assert fetched == 1 and refreshed == len(MAILBOX)
     async with connection() as conn:
         new = await (await conn.execute("SELECT stage, is_unread FROM emails WHERE gm_msgid = 9999")).fetchone()
@@ -41,4 +44,4 @@ async def test_sync_fetches_only_new_mail_and_refreshes_flags(ingested, monkeypa
     assert flagged == {"is_unread": False, "is_starred": True}
     assert state["last_uid"] == new_uid
 
-    assert await pipeline.run_sync(ingested) == (0, len(MAILBOX))
+    assert await pipeline.run_sync(ingested, job_id) == (0, len(MAILBOX))

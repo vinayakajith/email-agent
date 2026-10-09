@@ -53,7 +53,6 @@ async def test_filters_apply_to_both_retrievers(ingested):
 async def test_search_never_crosses_accounts(ingested):
     from email_agent.accounts import Account
     from email_agent.db.pool import connection
-    from email_agent.ingest import pipeline
 
     async with connection() as conn:
         row = await (await conn.execute(
@@ -64,7 +63,9 @@ async def test_search_never_crosses_accounts(ingested):
             "SELECT id FROM emails WHERE account_id = %s", (ingested.id,))).fetchall()}
     other = Account(**row)
     # Same mailbox content ingested into a second account.
-    await pipeline.run_ingest(other, await pipeline.plan_fetch(other, None), None)
+    from tests.conftest import run_job_now
+
+    assert (await run_job_now(other, "full"))["status"] == "done"
 
     for mode in ("bm25", "vector", "hybrid"):
         for acct, allowed in ((ingested, mine), (other, None)):

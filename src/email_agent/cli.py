@@ -118,10 +118,8 @@ def ingest(
     account: str = typer.Option(None, help="Account email if several are connected"),
 ) -> None:
     """Ingest Gmail for a chosen time frame. Re-running resumes or widens a previous ingest."""
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeRemainingColumn
-
     from email_agent.accounts import get_account
-    from email_agent.ingest.pipeline import plan_fetch, run_ingest
+    from email_agent.ingest.pipeline import plan_fetch
 
     if since and full:
         raise typer.BadParameter("Use either --since or --full, not both.")
@@ -146,42 +144,65 @@ def ingest(
             return
         if not (yes or typer.confirm("Start ingestion?", default=True)):
             return
-        columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), TimeRemainingColumn())
-        with Progress(*columns, console=console) as bar:
-            tasks: dict[str, int] = {}
-
-            def progress(stage: str, done: int, total: int) -> None:
-                if stage not in tasks:
-                    tasks[stage] = bar.add_task(stage, total=total)
-                bar.update(tasks[stage], completed=done, total=total)
-
-            await run_ingest(acct, plan, None if full else since_date, progress)
-        console.print("[green]Ingestion finished.[/] Run `email-agent status` for details.")
+        await _submit(acct, "full" if full else "since", None if full else since_date)
 
     _run(main())
 
 
-async def _process_pending(acct) -> None:
-    """Run enrich + embed over whatever is pending, with progress bars and a job record."""
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+async def _run_inline(job_id: int, worker_id: str) -> None:
+    """No worker running: execute the job in this process through the same runner."""
+    from email_agent import jobs
+    from email_agent.worker.runner import run_now
 
-    from email_agent.ingest.pipeline import finish_job, process_stages, start_job
+    await jobs.requeue_stale()
+    while (job := await jobs.get(job_id))["status"] not in ("done", "failed"):
+        # Claim fails while another job for this account runs or a retry is scheduled later.
+        if job["status"] != "queued" or await run_now(job_id, worker_id) is None:
+            await asyncio.sleep(2)
 
-    job_id = await start_job(acct, "sync", None)
-    with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
-        tasks: dict[str, int] = {}
 
-        def progress(stage: str, done: int, total: int) -> None:
-            if stage not in tasks:
-                tasks[stage] = bar.add_task(stage, total=total)
-            bar.update(tasks[stage], completed=done, total=total)
+async def _submit(acct, mode: str, since: date | None = None) -> None:
+    """Queue an ingestion job and follow its progress from the database.
 
-        try:
-            await process_stages(acct, job_id, progress)
-        except BaseException as e:
-            await finish_job(job_id, f"{type(e).__name__}: {e}")
-            raise
-    await finish_job(job_id)
+    The background worker runs it when one is alive; otherwise this process does.
+    """
+    import contextlib
+
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
+
+    from email_agent import jobs
+
+    job_id = await jobs.enqueue(acct.id, mode, since)
+    inline = None
+    if await jobs.live_workers():
+        console.print(f"Job #{job_id} queued for the background worker (Ctrl-C stops watching; the job continues).")
+    else:
+        console.print(f"Job #{job_id}: no worker running, so it runs here. Start `email-agent worker` to run jobs in the background.")
+        inline = asyncio.create_task(_run_inline(job_id, jobs.new_worker_id("cli")))
+    columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), TimeElapsedColumn())
+    try:
+        with Progress(*columns, console=console) as bar:
+            task = bar.add_task("queued", total=None)
+            while True:
+                job = await jobs.get(job_id)
+                if job["status"] == "running" and job["stage"]:
+                    bar.update(task, description=job["stage"], completed=job["stage_done"], total=job["stage_total"])
+                elif job["status"] == "queued":
+                    bar.update(task, description="queued" if not job["error"] else f"retry scheduled: {job['error'][:60]}")
+                if job["status"] in ("done", "failed"):
+                    break
+                await asyncio.sleep(1)
+    finally:
+        if inline is not None and not inline.done():
+            inline.cancel()  # the runner hands the job back to the queue
+            with contextlib.suppress(asyncio.CancelledError):
+                await inline
+    if job["status"] == "failed":
+        console.print(f"[red]Job #{job_id} failed:[/] {job['error']}")
+        raise typer.Exit(1)
+    console.print(
+        f"[green]Job #{job_id} done.[/] fetched {job['fetched']:,} · extracted {job['enriched']:,} · embedded {job['embedded']:,}"
+    )
 
 
 @app.command()
@@ -190,7 +211,7 @@ def resume(account: str = typer.Option(None, help="Account email if several are 
     from email_agent.accounts import get_account
 
     async def main():
-        await _process_pending(await get_account(account))
+        await _submit(await get_account(account), "process")
 
     _run(main())
 
@@ -204,7 +225,6 @@ def reenrich(
     from email_agent.accounts import get_account
     from email_agent.db.pool import connection
     from email_agent.ingest.enrich import EXTRACTOR_VERSION
-    from email_agent.ingest.pipeline import mark_stale_facts
 
     async def main():
         acct = await get_account(account)
@@ -223,8 +243,7 @@ def reenrich(
         )
         if not (yes or await asyncio.to_thread(typer.confirm, "Continue?", default=True)):
             return
-        await mark_stale_facts(acct)
-        await _process_pending(acct)
+        await _submit(acct, "reenrich")
 
     _run(main())
 
@@ -232,29 +251,12 @@ def reenrich(
 @app.command()
 def sync(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
     """Fetch and process mail that arrived since the last ingest or sync."""
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
-
     from email_agent.accounts import get_account
-    from email_agent.ingest.pipeline import run_sync
 
     async def main():
-        acct = await get_account(account)
-        with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
-            tasks: dict[str, int] = {}
+        await _submit(await get_account(account), "sync")
 
-            def progress(stage: str, done: int, total: int) -> None:
-                if stage not in tasks:
-                    tasks[stage] = bar.add_task(stage, total=total)
-                bar.update(tasks[stage], completed=done, total=total)
-
-            return await run_sync(acct, progress)
-
-    try:
-        fetched, refreshed = _run(main())
-    except RuntimeError as e:
-        console.print(f"[red]{e}[/]")
-        raise typer.Exit(1)
-    console.print(f"[green]Synced.[/] {fetched} new emails; read/star state refreshed for {refreshed}.")
+    _run(main())
 
 
 @app.command("eval-retrieval")
@@ -437,11 +439,13 @@ def status(account: str = typer.Option(None, help="Account email if several are 
     from email_agent.accounts import get_account
     from email_agent.ingest.pipeline import stage_counts
 
+    from email_agent import jobs
+
     async def main():
         acct = await get_account(account)
-        return acct, await stage_counts(acct.id)
+        return acct, await stage_counts(acct.id), await jobs.live_workers(), await jobs.open_jobs(acct.id)
 
-    acct, info = _run(main())
+    acct, info, workers, open_jobs = _run(main())
     table = Table("stage", "emails")
     for stage in ("fetched", "enriched", "embedded"):
         table.add_row(stage, f"{info['stages'].get(stage, 0):,}")
@@ -451,6 +455,10 @@ def status(account: str = typer.Option(None, help="Account email if several are 
     if sync := info["sync"]:
         covered = "full mailbox" if sync["since_date"] is None else f"since {sync['since_date']}"
         console.print(f"covered: {covered}; last synced {sync['last_synced_at']:%Y-%m-%d %H:%M}")
+    console.print(f"worker: {'[green]running[/]' if workers else '[yellow]not running[/] (`email-agent worker`)'}")
+    for j in open_jobs:
+        detail = f"{j['stage']} {j['stage_done']}/{j['stage_total']}" if j["status"] == "running" and j["stage"] else ""
+        console.print(f"  job #{j['id']} {j['mode']}: {j['status']} {detail}".rstrip())
     if job := info["last_job"]:
         console.print(f"last job #{job['id']}: {job['status']}" + (f" ({job['error']})" if job["error"] else ""))
         if job["enrich_input_tokens"]:

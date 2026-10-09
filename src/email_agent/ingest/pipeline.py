@@ -7,7 +7,7 @@ also makes widening the time frame later only download what is missing.
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date
 
@@ -20,10 +20,10 @@ from email_agent.ingest.parser import parse_email
 
 log = logging.getLogger(__name__)
 FETCH_BATCH = 100
-Progress = Callable[[str, int, int], None]  # (stage, done, total)
+Progress = Callable[[str, int, int], Awaitable[None]]  # (stage, done, total)
 
 
-def _noop(stage: str, done: int, total: int) -> None:
+async def _noop(stage: str, done: int, total: int) -> None:
     pass
 
 
@@ -111,7 +111,7 @@ def _rows(account_id: int, msgs: list[RawMessage]) -> list[dict]:
 
 async def fetch_stage(account: Account, plan: FetchPlan, job_id: int, progress: Progress = _noop) -> int:
     total, done = len(plan.to_fetch), 0
-    progress("fetch", 0, total)
+    await progress("fetch", 0, total)
     if not total:
         return 0
     imap = GmailIMAP(account.imap_host, account.email, account.password)
@@ -130,7 +130,7 @@ async def fetch_stage(account: Account, plan: FetchPlan, job_id: int, progress: 
                         "UPDATE ingest_jobs SET fetched = fetched + %s WHERE id = %s", (len(rows), job_id)
                     )
             done += len(batch)
-            progress("fetch", done, total)
+            await progress("fetch", done, total)
     finally:
         await asyncio.to_thread(imap.__exit__, None, None, None)
     return done
@@ -154,25 +154,6 @@ async def save_sync_state(account: Account, uidvalidity: int, since: date | None
                 last_synced_at = now()
             """,
             {"a": account.id, "v": uidvalidity, "since": since},
-        )
-
-
-async def start_job(account: Account, mode: str, since: date | None) -> int:
-    async with connection() as conn:
-        row = await (
-            await conn.execute(
-                "INSERT INTO ingest_jobs (account_id, mode, since_date) VALUES (%s, %s, %s) RETURNING id",
-                (account.id, mode, since),
-            )
-        ).fetchone()
-    return row["id"]
-
-
-async def finish_job(job_id: int, error: str | None = None) -> None:
-    async with connection() as conn:
-        await conn.execute(
-            "UPDATE ingest_jobs SET status = %s, error = %s, finished_at = now() WHERE id = %s",
-            ("failed" if error else "done", error, job_id),
         )
 
 
@@ -202,17 +183,16 @@ async def mark_stale_facts(account: Account) -> int:
         return cur.rowcount
 
 
-async def run_ingest(account: Account, plan: FetchPlan, since: date | None, progress: Progress = _noop) -> int:
-    job_id = await start_job(account, "since" if since else "full", since)
-    try:
-        await fetch_stage(account, plan, job_id, progress)
-        await save_sync_state(account, plan.uidvalidity, since)
-        await process_stages(account, job_id, progress)
-    except BaseException as e:
-        await finish_job(job_id, f"{type(e).__name__}: {e}")
-        raise
-    await finish_job(job_id)
-    return job_id
+async def run_ingest(account: Account, since: date | None, job_id: int, progress: Progress = _noop) -> int:
+    """Fetch everything in the time frame that is not stored yet, then process it.
+
+    `since=None` means the full mailbox. Returns the number of emails fetched.
+    """
+    plan = await plan_fetch(account, since)
+    fetched = await fetch_stage(account, plan, job_id, progress)
+    await save_sync_state(account, plan.uidvalidity, since)
+    await process_stages(account, job_id, progress)
+    return fetched
 
 
 FLAG_REFRESH_DAYS = 30
@@ -249,28 +229,24 @@ async def get_sync_state(account: Account) -> dict | None:
         ).fetchone()
 
 
-async def run_sync(account: Account, progress: Progress = _noop) -> tuple[int, int]:
+async def run_sync(account: Account, job_id: int, progress: Progress = _noop) -> tuple[int, int]:
     """Fetch mail newer than the last sync, process it, and refresh recent flags.
 
     Returns (new emails fetched, flags refreshed).
     """
+    from email_agent.jobs import PermanentJobError
+
     state = await get_sync_state(account)
     if state is None:
-        raise RuntimeError("Nothing ingested yet; run `email-agent ingest` first.")
+        raise PermanentJobError("Nothing ingested yet; run `email-agent ingest` first.")
     plan = await plan_fetch(account, None, min_uid=state["last_uid"] + 1)
     if plan.uidvalidity != state["uidvalidity"]:
         # UIDs were renumbered by the server: rescan the covered range; gm_msgid dedupes.
         plan = await plan_fetch(account, state["since_date"])
-    job_id = await start_job(account, "sync", None)
-    try:
-        fetched = await fetch_stage(account, plan, job_id, progress)
-        await save_sync_state(account, plan.uidvalidity, state["since_date"])
-        await process_stages(account, job_id, progress)
-        refreshed = await refresh_flags(account)
-    except BaseException as e:
-        await finish_job(job_id, f"{type(e).__name__}: {e}")
-        raise
-    await finish_job(job_id)
+    fetched = await fetch_stage(account, plan, job_id, progress)
+    await save_sync_state(account, plan.uidvalidity, state["since_date"])
+    await process_stages(account, job_id, progress)
+    refreshed = await refresh_flags(account)
     return fetched, refreshed
 
 

@@ -117,3 +117,13 @@ async def get_account(email: str | None = None) -> Account:
     if len(rows) > 1 and not email:
         raise AccountError("Several accounts connected; pass --account.")
     return Account(**rows[0])
+
+
+async def get_account_by_id(account_id: int) -> Account:
+    async with connection() as conn:
+        row = await (await conn.execute(
+            "SELECT id, email, imap_host, smtp_host, auth_method FROM accounts WHERE id = %s", (account_id,)
+        )).fetchone()
+    if row is None:
+        raise AccountError(f"Account {account_id} no longer exists.")
+    return Account(**row)

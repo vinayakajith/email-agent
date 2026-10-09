@@ -76,7 +76,7 @@ async def embed_stage(account, job_id: int, progress, embedder: Embedder | None 
             ).fetchone()
         )["n"]
     done = 0
-    progress("embed", 0, total)
+    await progress("embed", 0, total)
     while True:
         async with connection() as conn:
             emails = await (
@@ -111,5 +111,5 @@ async def embed_stage(account, job_id: int, progress, embedder: Embedder | None 
                 await conn.execute("UPDATE emails SET stage = 'embedded' WHERE id = ANY(%s)", (ids,))
                 await conn.execute("UPDATE ingest_jobs SET embedded = embedded + %s WHERE id = %s", (len(ids), job_id))
         done += len(emails)
-        progress("embed", done, total)
+        await progress("embed", done, total)
     return done

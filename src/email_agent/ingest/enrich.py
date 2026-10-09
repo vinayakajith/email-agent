@@ -183,7 +183,7 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
         )["n"]
     done = failed = 0
     after_id = 0
-    progress("enrich", 0, total)
+    await progress("enrich", 0, total)
     while True:
         async with connection() as conn:
             emails = await (
@@ -223,5 +223,5 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
                     (len(rows), spent["in"], spent["cached"], spent["out"], job_id),
                 )
         done += len(emails)
-        progress("enrich", done, total)
+        await progress("enrich", done, total)
     return done - failed, failed

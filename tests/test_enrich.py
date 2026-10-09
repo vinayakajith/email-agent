@@ -15,7 +15,9 @@ def fakes(monkeypatch):
 
 
 async def test_enrich_saves_facts_and_leaves_failures_for_retry(account):
-    await pipeline.run_ingest(account, await pipeline.plan_fetch(account, None), None)
+    from tests.conftest import run_job_now
+
+    await run_job_now(account, "full")
     async with connection() as conn:
         facts = {
             r["merchant"]: r
@@ -46,12 +48,13 @@ def test_render_email_without_date():
 
 async def test_stale_facts_are_reextracted(ingested):
     from email_agent.ingest.enrich import EXTRACTOR_VERSION
-    from email_agent.ingest.pipeline import mark_stale_facts, process_stages, start_job
+    from email_agent import jobs
+    from email_agent.ingest.pipeline import _noop, mark_stale_facts, process_stages
 
     async with connection() as conn:
         await conn.execute("UPDATE email_facts SET extractor_version = %s", (EXTRACTOR_VERSION - 1,))
     assert await mark_stale_facts(ingested) == len(MAILBOX) - 1
-    await process_stages(ingested, await start_job(ingested, "sync", None), lambda *a: None)
+    await process_stages(ingested, await jobs.enqueue(ingested.id, "process"), _noop)
     async with connection() as conn:
         versions = await (await conn.execute("SELECT DISTINCT extractor_version AS v FROM email_facts")).fetchall()
         stages = await (await conn.execute("SELECT stage, count(*) AS n FROM emails GROUP BY stage")).fetchall()

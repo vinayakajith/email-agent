@@ -12,7 +12,7 @@ import pytest  # noqa: E402
 from email_agent.config import get_settings  # noqa: E402
 from email_agent.db.migrate import migrate  # noqa: E402
 
-TABLES = "agent_runs, drafts, chunks, email_facts, emails, ingest_jobs, sync_state, accounts"
+TABLES = "agent_runs, drafts, chunks, email_facts, emails, ingest_jobs, sync_state, workers, accounts"
 
 
 @pytest.fixture(scope="session")
@@ -66,5 +66,16 @@ async def ingested(account, monkeypatch):
 
     monkeypatch.setattr(pipeline, "GmailIMAP", FakeIMAP)
     monkeypatch.setattr("email_agent.accounts.get_password", lambda email: "secret")
-    await pipeline.run_ingest(account, await pipeline.plan_fetch(account, None), None)
+    job = await run_job_now(account, "full")
+    assert job["status"] == "done", job["error"]
     return account
+
+
+async def run_job_now(account, mode: str, since=None) -> dict:
+    """Enqueue a job and run it in-process through the real runner; returns the final job row."""
+    from email_agent import jobs
+    from email_agent.worker.runner import run_now
+
+    job_id = await jobs.enqueue(account.id, mode, since)
+    await run_now(job_id, "test-worker")
+    return await jobs.get(job_id)
