@@ -1,0 +1,41 @@
+[project]
+name = "email-agent"
+version = "0.1.0"
+description = "Autonomous research agent over your Gmail: hybrid search + ReAct agent"
+authors = [
+    { name = "vinayak ajith", email = "103891127+vinayakajith@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "email-reply-parser>=0.5.12",
+    "imapclient>=4.1.0",
+    "keyring>=25.7.0",
+    "openai>=3.27.0",
+    "pgvector>=0.5.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "selectolax>=1.0.0",
+    "tenacity>=9.2.1",
+    "tiktoken>=0.14.0",
+    "typer>=0.27.3",
+    "voyageai>=0.5.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[project.scripts]
+email-agent = "email_agent.cli:app"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
