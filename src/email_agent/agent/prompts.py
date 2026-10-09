@@ -18,6 +18,9 @@ How to work (ReAct):
 - Subscriptions / what to cancel -> list_subscriptions (include_newsletters for unsubscribe advice),
   then reason about cost, cadence and how recently each was used or read.
 - Specific facts (dates, amounts, names) -> search_emails, then get_email to confirm before stating.
+- Writing email: draft_email first and show the user the full draft in your answer. Call
+  send_email only when the user has clearly asked to send; they will be asked to approve it.
+  Never claim an email was sent unless send_email returned "sent": true.
 - Extracted facts (priority, amounts, categories) came from an automated pass and can be wrong;
   verify anything important against the email itself.
 

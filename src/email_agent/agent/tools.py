@@ -4,7 +4,9 @@ Each tool returns a JSON-serialisable dict. Results carry email ids so the agent
 them and the CLI can render sources.
 """
 
+import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -115,6 +117,27 @@ TOOL_SCHEMAS = [
             "merchant": {"type": "string", "description": "Substring filter on merchant name."},
         },
         required=["kind", "date_from", "date_to"],
+    ),
+    _fn(
+        "draft_email",
+        "Prepare an email or a reply. Nothing is sent: it returns a draft_id to show the user. For "
+        "replies pass reply_to_email_id; 'to' then defaults to the original sender and the subject "
+        "and threading headers are set automatically.",
+        {
+            "to": {"type": "array", "items": {"type": "string"}, "description": "Recipient addresses."},
+            "cc": {"type": "array", "items": {"type": "string"}},
+            "subject": {"type": "string"},
+            "body": {"type": "string", "description": "Plain-text body, signed as the mailbox owner."},
+            "reply_to_email_id": {"type": "integer"},
+        },
+        required=["body"],
+    ),
+    _fn(
+        "send_email",
+        "Send a previously drafted email. Only call this when the user has asked for the email to be "
+        "sent. The user is always shown the draft and must approve it; if they decline, ask what to change.",
+        {"draft_id": {"type": "integer"}},
+        required=["draft_id"],
     ),
     _fn(
         "list_subscriptions",
@@ -371,6 +394,89 @@ async def list_subscriptions(ctx: ToolContext, active_since=None, include_newsle
     return result
 
 
+EMAIL_RE = re.compile(r"^[^@\s<>,]+@[^@\s<>,]+\.[^@\s<>,]+$")
+
+
+def _addresses(values: list[str] | None) -> list[str]:
+    out = []
+    for v in values or []:
+        v = v.strip()
+        if not EMAIL_RE.match(v):
+            raise ValueError(f"Not a valid email address: {v!r}")
+        out.append(v.lower())
+    return out
+
+
+async def draft_email(ctx: ToolContext, body, to=None, cc=None, subject=None, reply_to_email_id=None):
+    from email_agent.smtp.sender import reply_subject
+
+    to_addrs, cc_addrs = _addresses(to), _addresses(cc)
+    if reply_to_email_id is not None:
+        async with connection() as conn:
+            original = await (await conn.execute(
+                "SELECT subject, from_addr FROM emails WHERE id = %s AND account_id = %s",
+                (reply_to_email_id, ctx.account.id),
+            )).fetchone()
+        if original is None:
+            return {"error": f"No email with id {reply_to_email_id} to reply to"}
+        to_addrs = to_addrs or [original["from_addr"]]
+        subject = subject or reply_subject(original["subject"])
+    if not to_addrs:
+        return {"error": "A draft needs at least one recipient"}
+    if not subject:
+        return {"error": "A new email needs a subject"}
+    async with connection() as conn:
+        row = await (await conn.execute(
+            """INSERT INTO drafts (account_id, to_addrs, cc_addrs, subject, body, in_reply_to_email_id)
+               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+            (ctx.account.id, to_addrs, cc_addrs, subject, body, reply_to_email_id),
+        )).fetchone()
+    return {
+        "draft_id": row["id"], "to": to_addrs, "cc": cc_addrs, "subject": subject, "body": body,
+        "status": "draft saved, not sent",
+    }
+
+
+async def _load_draft(ctx: ToolContext, draft_id: int) -> dict | None:
+    async with connection() as conn:
+        return await (await conn.execute(
+            """SELECT d.*, e.message_id AS reply_message_id, e."references" AS reply_references
+               FROM drafts d LEFT JOIN emails e ON e.id = d.in_reply_to_email_id
+               WHERE d.id = %s AND d.account_id = %s""",
+            (draft_id, ctx.account.id),
+        )).fetchone()
+
+
+def _draft_preview(d: dict) -> dict:
+    return {"draft_id": d["id"], "to": d["to_addrs"], "cc": d["cc_addrs"], "subject": d["subject"], "body": d["body"]}
+
+
+async def send_email(ctx: ToolContext, draft_id):
+    from email_agent.smtp.sender import build_message, send_message
+
+    d = await _load_draft(ctx, draft_id)
+    if d is None:
+        return {"error": f"No draft with id {draft_id}"}
+    if d["status"] != "pending":
+        return {"error": f"Draft {draft_id} is already {d['status']}"}
+    # The tool asks for confirmation itself, so nothing is ever sent without the user's yes.
+    if not await ctx.confirm(_draft_preview(d)):
+        return {"sent": False, "draft_id": draft_id, "reason": "The user declined to send this draft."}
+    msg = build_message(
+        ctx.account.email, d["to_addrs"], d["cc_addrs"], d["subject"], d["body"],
+        d["reply_message_id"], d["reply_references"],
+    )
+    message_id = await asyncio.to_thread(
+        send_message, ctx.account.smtp_host, ctx.account.email, ctx.account.password, msg
+    )
+    async with connection() as conn:
+        await conn.execute(
+            "UPDATE drafts SET status = 'sent', smtp_message_id = %s, sent_at = now() WHERE id = %s",
+            (message_id, draft_id),
+        )
+    return {"sent": True, "draft_id": draft_id, "message_id": message_id, "to": d["to_addrs"]}
+
+
 TOOLS: dict[str, Callable[..., Awaitable[dict]]] = {
     "search_emails": search_emails,
     "filter_emails": filter_emails,
@@ -378,16 +484,22 @@ TOOLS: dict[str, Callable[..., Awaitable[dict]]] = {
     "get_thread": get_thread,
     "aggregate_spend": aggregate_spend,
     "list_subscriptions": list_subscriptions,
+    "draft_email": draft_email,
+    "send_email": send_email,
 }
 
 
 # Tools that act on the outside world and must be confirmed by the user first.
-CONFIRM_TOOLS: set[str] = set()
+CONFIRM_TOOLS: set[str] = {"send_email"}
 
 
 async def confirmation_preview(ctx: ToolContext, name: str, arguments: str) -> dict | None:
-    """What the user is shown before a CONFIRM_TOOLS call runs."""
-    return None
+    """What a UI shows before a CONFIRM_TOOLS call runs (None if the call is invalid)."""
+    try:
+        d = await _load_draft(ctx, json.loads(arguments)["draft_id"])
+    except Exception:
+        return None
+    return _draft_preview(d) if d and d["status"] == "pending" else None
 
 
 async def call_tool(ctx: ToolContext, name: str, arguments: str) -> dict:
