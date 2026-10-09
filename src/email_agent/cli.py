@@ -181,6 +181,76 @@ def profile_cmd(
     _edit_profile(name, timezone, about)
 
 
+memory_app = typer.Typer(help="What the assistant remembers about you.", no_args_is_help=True)
+app.add_typer(memory_app, name="memory")
+
+
+def _with_account(fn):
+    from email_agent.accounts import get_account
+
+    async def main():
+        return await fn(await get_account())
+
+    return _run(main())
+
+
+@memory_app.command("list")
+def memory_list() -> None:
+    """Your saved notes and the insights from past conversations."""
+    from email_agent import memory
+
+    notes = _with_account(lambda a: memory.list_all(a.id))
+    if not notes:
+        console.print("Nothing remembered yet. Ask the assistant to \"remember …\" in chat.")
+        return
+    table = Table("topic", "from", "updated", "note")
+    for n in notes:
+        label = "you" if n["source"] == "user" else "dream"
+        table.add_row(n["topic"], label, f"{n['updated_at']:%Y-%m-%d}", n["content"])
+    console.print(table)
+
+
+@memory_app.command("show")
+def memory_show(topic: str) -> None:
+    """Show one note in full."""
+    from email_agent import memory
+
+    notes = {n["topic"]: n for n in _with_account(lambda a: memory.list_all(a.id))}
+    note = notes.get(memory.normalize_topic(topic))
+    console.print(note["content"] if note else f"[red]No note with topic {topic!r}[/]")
+
+
+@memory_app.command("forget")
+def memory_forget(topic: str) -> None:
+    """Delete a note (yours or an insight)."""
+    from email_agent import memory
+
+    removed = _with_account(lambda a: memory.forget(a.id, topic))
+    console.print("Forgotten." if removed else f"[red]No note with topic {topic!r}[/]")
+
+
+@memory_app.command("history")
+def memory_history(topic: str = typer.Argument(None), limit: int = typer.Option(30)) -> None:
+    """Every change to memory, newest first (job = the dream that made it)."""
+    from email_agent import memory
+
+    rows = _with_account(lambda a: memory.history(a.id, memory.normalize_topic(topic) if topic else None, limit))
+    table = Table("when", "topic", "change", "by", "job", "content")
+    for r in rows:
+        content = r["new_content"] if r["new_content"] is not None else f"(was) {r['old_content']}"
+        table.add_row(f"{r['created_at']:%m-%d %H:%M}", r["topic"], r["op"], r["source"], str(r["job_id"] or ""), content)
+    console.print(table)
+
+
+@memory_app.command("rollback")
+def memory_rollback(job_id: int) -> None:
+    """Undo everything one dream changed."""
+    from email_agent import memory
+
+    n = _with_account(lambda a: memory.rollback_job(a.id, job_id))
+    console.print(f"Undid {n} change(s) from job #{job_id}." if n else f"Job #{job_id} made no memory changes.")
+
+
 TIME_FRAMES = {"1": ("Last 30 days", 30), "2": ("Last 90 days", 90), "3": ("Last year", 365), "4": ("Custom start date", None), "5": ("Full mailbox", None)}
 # Rough per-email token averages, only for the pre-flight estimate.
 EST_ENRICH_TOKENS, EST_EMBED_TOKENS = 1_000, 700
