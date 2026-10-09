@@ -5,16 +5,12 @@ tools -> static system prompt -> conversation history (append-only) -> newest it
 Anything that changes per request (like the current time) must come after the cached part.
 """
 
-import re
-
-_GPT_VERSION = re.compile(r"^gpt-(\d+)(?:\.(\d+))?")
-# Explicit breakpoints and prompt_cache_options are documented for gpt-5.6 and later.
-_MIN_EXPLICIT = (5, 6)
-
-
-def supports_explicit_breakpoints(model: str) -> bool:
-    m = _GPT_VERSION.match(model)
-    return bool(m) and (int(m.group(1)), int(m.group(2) or 0)) >= _MIN_EXPLICIT
+# Conversations: keep OpenAI's automatic breakpoint at the end of each request (so step N+1
+# reuses step N) in addition to the explicit breakpoints placed on stable blocks.
+CACHE_OPTIONS = {"mode": "implicit"}
+# Independent one-shot requests (per-email extraction): the end of each request is unique and
+# never reused, so only the explicit breakpoints on shared blocks are written.
+ONE_SHOT_CACHE_OPTIONS = {"mode": "explicit"}
 
 
 def cache_key(account_id: int, purpose: str) -> str:

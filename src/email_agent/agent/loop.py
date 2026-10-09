@@ -21,7 +21,7 @@ from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, O
 from email_agent.agent.prompts import calendar_note, system_prompt
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
-from email_agent.prompt_cache import cache_key, supports_explicit_breakpoints, text_message, usage_counts
+from email_agent.prompt_cache import CACHE_OPTIONS, cache_key, text_message, usage_counts
 
 CITATION_RE = re.compile(r"\[#(\d+)\]")
 ConfirmFn = Callable[[dict], Awaitable[bool]]
@@ -38,12 +38,11 @@ class Agent:
         self.tz = s.tz
         self.ctx = agent_tools.ToolContext(account, confirm)
         self.conversation_id = uuid.uuid4()
-        self.explicit_cache = supports_explicit_breakpoints(self.model)
         # Full Responses API input, append-only across steps and turns so every request's prefix
         # matches the previous one. The static system prompt comes first and ends in a breakpoint
         # shared by all conversations of this account.
         self.history: list[dict] = [
-            text_message("developer", system_prompt(account.email), breakpoint=self.explicit_cache)
+            text_message("developer", system_prompt(account.email), breakpoint=True)
         ]
 
     async def _respond(self, final: bool = False):
@@ -52,14 +51,11 @@ class Agent:
             kwargs["reasoning"] = self.reasoning
             # Stateless (store=False) multi-step reasoning needs the encrypted reasoning items back.
             kwargs["include"] = ["reasoning.encrypted_content"]
-        if self.explicit_cache:
-            # Implicit mode keeps OpenAI's automatic breakpoint at the end of each request (so step
-            # N+1 reuses step N) in addition to our explicit ones.
-            kwargs["prompt_cache_options"] = {"mode": "implicit"}
         return await self.client.responses.create(
             model=self.model,
             input=self.history,
             prompt_cache_key=cache_key(self.account.id, "agent"),
+            prompt_cache_options=CACHE_OPTIONS,
             tools=agent_tools.TOOL_SCHEMAS,
             tool_choice="none" if final else "auto",
             parallel_tool_calls=True,
@@ -71,7 +67,7 @@ class Agent:
         started = time.monotonic()
         self.history.append(text_message("developer", calendar_note(self.tz), breakpoint=False))
         # Breakpoint after the question: later steps and turns all extend this prefix.
-        self.history.append(text_message("user", question, breakpoint=self.explicit_cache))
+        self.history.append(text_message("user", question, breakpoint=True))
         events: list[Event] = []
         usage = {"in": 0, "cached": 0, "cache_write": 0, "out": 0}
 

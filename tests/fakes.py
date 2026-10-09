@@ -17,6 +17,7 @@ class FakeEnricher:
 
     def __init__(self, owner: str = "me@gmail.com", prompt_cache_key: str | None = None):
         self.calls = 0
+        self.usage = {"in": 0, "cached": 0, "cache_write": 0, "out": 0}
 
     async def extract(self, email: dict) -> EmailFacts:
         self.calls += 1

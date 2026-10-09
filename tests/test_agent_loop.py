@@ -125,7 +125,7 @@ async def test_every_request_extends_the_previous_prefix(ingested):
         Resp([Item("message", text="Two.")]),
     ])
     agent = Agent(ingested, client=client)
-    assert agent.model == "gpt-6-luna" and agent.explicit_cache
+    assert agent.model == "gpt-6-luna"
     [e async for e in agent.run("first")]
     [e async for e in agent.run("second")]
 
@@ -142,21 +142,26 @@ async def test_every_request_extends_the_previous_prefix(ingested):
     assert "prompt_cache_breakpoint" not in calendar["content"][0]
 
 
-async def test_breakpoints_only_for_models_that_support_them(ingested):
-    from email_agent.prompt_cache import supports_explicit_breakpoints
-
-    assert supports_explicit_breakpoints("gpt-6-luna") and supports_explicit_breakpoints("gpt-5.6")
-    assert not supports_explicit_breakpoints("gpt-5-mini") and not supports_explicit_breakpoints("o3")
-
+async def test_requests_carry_cache_breakpoints_and_options(ingested):
     client = ScriptedClient([Resp([Item("message", text="ok")])])
-    agent = Agent(ingested, client=client)
-    agent.model, agent.explicit_cache = "gpt-5-mini", False
-    agent.history = agent.history[:1]
-    agent.history[0]["content"][0].pop("prompt_cache_breakpoint", None)
-    [e async for e in agent.run("q")]
+    [e async for e in Agent(ingested, client=client).run("q")]
     req = client.calls[0]
-    assert "prompt_cache_options" not in req
-    assert not any("prompt_cache_breakpoint" in b for i in req["input"] for b in i.get("content", []) if isinstance(b, dict))
+    assert req["prompt_cache_options"] == {"mode": "implicit"}
+    marked = [i["role"] for i in req["input"] if "prompt_cache_breakpoint" in i["content"][0]]
+    assert marked == ["developer", "user"]  # end of system prompt, end of the question
+
+
+def test_only_gpt6_class_models_are_accepted(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    from email_agent.config import Settings
+
+    for ok in ("gpt-6-luna", "gpt-6.1-sol", "gpt-7"):
+        assert Settings(openai_model=ok).openai_model == ok
+    for bad in ("gpt-5-mini", "gpt-5.6", "o3", "gpt-4o"):
+        with pytest.raises(ValidationError):
+            Settings(openai_enrich_model=bad)
 
 
 async def test_cached_tokens_are_tracked(ingested):

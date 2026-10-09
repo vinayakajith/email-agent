@@ -15,7 +15,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ra
 
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
-from email_agent.prompt_cache import cache_key
+from email_agent.prompt_cache import ONE_SHOT_CACHE_OPTIONS, cache_key, text_message, usage_counts
 
 MAX_BODY_TOKENS = 2_000
 # Bump whenever EmailFacts or INSTRUCTIONS change meaning; `email-agent reenrich` then re-extracts
@@ -95,15 +95,17 @@ def _date(value: str | None) -> date | None:
 
 
 class Enricher:
-    def __init__(self, owner: str, prompt_cache_key: str | None = None):
+    def __init__(self, owner: str, prompt_cache_key: str | None = None, client: AsyncOpenAI | None = None):
         s = get_settings()
-        self.client = AsyncOpenAI(api_key=s.openai_api_key)
+        self.client = client or AsyncOpenAI(api_key=s.openai_api_key)
         self.model = s.openai_enrich_model
         self.reasoning = {"effort": s.enrich_reasoning_effort} if s.enrich_reasoning_effort else None
-        self.instructions = INSTRUCTIONS.format(owner=owner)
+        # Identical for every email, so it ends in a cache breakpoint; only the email varies.
+        self.prefix = text_message("developer", INSTRUCTIONS.format(owner=owner), breakpoint=True)
         self.semaphore = asyncio.Semaphore(s.enrich_concurrency)
         # Every call shares the instructions + output schema prefix; the key keeps them on one cache.
         self.prompt_cache_key = prompt_cache_key
+        self.usage = {"in": 0, "cached": 0, "cache_write": 0, "out": 0}
 
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)),
@@ -116,13 +118,15 @@ class Enricher:
         async with self.semaphore:
             resp = await self.client.responses.parse(
                 model=self.model,
-                instructions=self.instructions,
-                input=render_email(email),
+                input=[self.prefix, text_message("user", render_email(email), breakpoint=False)],
                 text_format=EmailFacts,
                 store=False,
                 prompt_cache_key=self.prompt_cache_key,
+                prompt_cache_options=ONE_SHOT_CACHE_OPTIONS,
                 **kwargs,
             )
+        for k, v in usage_counts(resp.usage).items():
+            self.usage[k] += v
         if resp.output_parsed is None:
             raise ValueError("model returned no parsed output (refusal or truncation)")
         return resp.output_parsed
@@ -192,7 +196,9 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
         if not emails:
             break
         after_id = emails[-1]["id"]
+        before = dict(enricher.usage)
         results = await asyncio.gather(*(enricher.extract(e) for e in emails), return_exceptions=True)
+        spent = {k: enricher.usage[k] - before[k] for k in before}
         rows = []
         for e, r in zip(emails, results):
             if isinstance(r, BaseException):
@@ -207,7 +213,13 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
                 await conn.execute(
                     "UPDATE emails SET stage = 'enriched' WHERE id = ANY(%s)", ([r["email_id"] for r in rows],)
                 )
-                await conn.execute("UPDATE ingest_jobs SET enriched = enriched + %s WHERE id = %s", (len(rows), job_id))
+                await conn.execute(
+                    """UPDATE ingest_jobs SET enriched = enriched + %s, enrich_input_tokens = enrich_input_tokens + %s,
+                              enrich_cached_tokens = enrich_cached_tokens + %s,
+                              enrich_output_tokens = enrich_output_tokens + %s
+                       WHERE id = %s""",
+                    (len(rows), spent["in"], spent["cached"], spent["out"], job_id),
+                )
         done += len(emails)
         progress("enrich", done, total)
     return done - failed, failed

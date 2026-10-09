@@ -425,6 +425,12 @@ def status(account: str = typer.Option(None, help="Account email if several are 
         console.print(f"covered: {covered}; last synced {sync['last_synced_at']:%Y-%m-%d %H:%M}")
     if job := info["last_job"]:
         console.print(f"last job #{job['id']}: {job['status']}" + (f" ({job['error']})" if job["error"] else ""))
+        if job["enrich_input_tokens"]:
+            hit = job["enrich_cached_tokens"] / job["enrich_input_tokens"]
+            console.print(
+                f"extraction: {job['enrich_input_tokens']:,} in ({job['enrich_cached_tokens']:,} cached, {hit:.0%}) / "
+                f"{job['enrich_output_tokens']:,} out tokens"
+            )
 
 
 if __name__ == "__main__":
