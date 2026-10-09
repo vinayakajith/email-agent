@@ -4,6 +4,7 @@ The secret goes to the OS keychain; the database only records the account. A fut
 calls `connect()` exactly as the CLI wizard does.
 """
 
+import asyncio
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -76,10 +77,11 @@ async def connect(email: str, app_password: str) -> Account:
     """Validate credentials against Gmail, store the secret, and upsert the account row."""
     email = email.strip().lower()
     password = normalize_app_password(app_password)
-    check_imap(email, password)
-    check_smtp(email, password)
+    # Network logins are blocking; keep them off the event loop (the API server shares it).
+    await asyncio.to_thread(check_imap, email, password)
+    await asyncio.to_thread(check_smtp, email, password)
     try:
-        keyring.set_password(KEYRING_SERVICE, email, password)
+        await asyncio.to_thread(keyring.set_password, KEYRING_SERVICE, email, password)
     except Exception as e:
         raise AccountError(
             f"Could not save to the keychain ({e}). Set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env instead."

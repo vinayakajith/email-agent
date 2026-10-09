@@ -530,6 +530,47 @@ def eval_retrieval(
     console.print(table)
 
 
+@app.command("app")
+def run_app(
+    port: int = typer.Option(8765, help="Local port"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't open the browser"),
+) -> None:
+    """Run the application: web UI, API and background worker. Ctrl-C stops everything."""
+    import signal
+    import subprocess
+    import sys
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from email_agent import jobs
+    from email_agent.api.app import WEB_DIST, create_app
+    from email_agent.db.migrate import migrate
+
+    setup_logging("INFO")
+    migrate()
+    worker_proc = None
+    if not _run(jobs.live_workers()):
+        worker_proc = subprocess.Popen([sys.executable, "-m", "email_agent.cli", "worker"])
+    if not WEB_DIST.exists():
+        console.print("[yellow]The web UI isn't built yet:[/] cd web && npm install && npm run build")
+    url = f"http://127.0.0.1:{port}"
+    console.print(f"email-agent is running at [bold]{url}[/] (Ctrl-C to stop)")
+    if not no_browser:
+        threading.Timer(1.0, webbrowser.open, (url,)).start()
+    try:
+        # Loopback only: the API can send email from your account.
+        uvicorn.run(create_app(), host="127.0.0.1", port=port, log_level="warning")
+    finally:
+        if worker_proc is not None and worker_proc.poll() is None:
+            worker_proc.send_signal(signal.SIGINT)
+            try:
+                worker_proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                worker_proc.kill()
+
+
 @app.command()
 def worker() -> None:
     """Run the background worker: watches for new mail and runs queued ingestion jobs.
