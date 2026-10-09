@@ -12,7 +12,7 @@ import pytest  # noqa: E402
 from email_agent.config import get_settings  # noqa: E402
 from email_agent.db.migrate import migrate  # noqa: E402
 
-TABLES = "agent_runs, drafts, chunks, email_facts, emails, ingest_jobs, sync_state, workers, accounts"
+TABLES = "agent_runs, drafts, conversation_items, conversations, chunks, email_facts, emails, ingest_jobs, sync_state, workers, accounts"
 
 
 @pytest.fixture(scope="session")

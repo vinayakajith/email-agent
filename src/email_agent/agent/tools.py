@@ -4,9 +4,9 @@ Each tool returns a JSON-serialisable dict. Results carry email ids so the agent
 them and the CLI can render sources.
 """
 
-import asyncio
 import json
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -141,8 +141,9 @@ TOOL_SCHEMAS = [
     ),
     _fn(
         "send_email",
-        "Send a previously drafted email. Only call this when the user has asked for the email to be "
-        "sent. The user is always shown the draft and must approve it; if they decline, ask what to change.",
+        "Request sending a previously drafted email. Only call this when the user has asked for it to be "
+        "sent. It does NOT send: the user is shown the draft and approves or rejects it themselves. "
+        "The outcome appears in the conversation later.",
         {"draft_id": {"type": "integer"}},
         required=["draft_id"],
     ),
@@ -159,15 +160,10 @@ TOOL_SCHEMAS = [
 ]
 
 
-async def deny_all(draft: dict) -> bool:
-    return False
-
-
 @dataclass
 class ToolContext:
     account: Account
-    # Asked before any irreversible action (sending email); returns True to proceed.
-    confirm: Callable[[dict], Awaitable[bool]] = deny_all
+    conversation_id: uuid.UUID | None = None
 
 
 def _iso(v):
@@ -492,9 +488,9 @@ async def draft_email(ctx: ToolContext, body, to=None, cc=None, subject=None, re
         return {"error": "A new email needs a subject"}
     async with connection() as conn:
         row = await (await conn.execute(
-            """INSERT INTO drafts (account_id, to_addrs, cc_addrs, subject, body, in_reply_to_email_id)
-               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-            (ctx.account.id, to_addrs, cc_addrs, subject, body, reply_to_email_id),
+            """INSERT INTO drafts (account_id, to_addrs, cc_addrs, subject, body, in_reply_to_email_id, conversation_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (ctx.account.id, to_addrs, cc_addrs, subject, body, reply_to_email_id, ctx.conversation_id),
         )).fetchone()
     return {
         "draft_id": row["id"], "to": to_addrs, "cc": cc_addrs, "subject": subject, "body": body,
@@ -502,44 +498,21 @@ async def draft_email(ctx: ToolContext, body, to=None, cc=None, subject=None, re
     }
 
 
-async def _load_draft(ctx: ToolContext, draft_id: int) -> dict | None:
-    async with connection() as conn:
-        return await (await conn.execute(
-            """SELECT d.*, e.message_id AS reply_message_id, e."references" AS reply_references
-               FROM drafts d LEFT JOIN emails e ON e.id = d.in_reply_to_email_id
-               WHERE d.id = %s AND d.account_id = %s""",
-            (draft_id, ctx.account.id),
-        )).fetchone()
-
-
-def _draft_preview(d: dict) -> dict:
-    return {"draft_id": d["id"], "to": d["to_addrs"], "cc": d["cc_addrs"], "subject": d["subject"], "body": d["body"]}
-
-
 async def send_email(ctx: ToolContext, draft_id):
-    from email_agent.smtp.sender import build_message, send_message
+    """Ask the user to approve sending. The agent cannot send; approval is a separate user action."""
+    from email_agent.drafts import DraftError, request_approval
 
-    d = await _load_draft(ctx, draft_id)
-    if d is None:
-        return {"error": f"No draft with id {draft_id}"}
-    if d["status"] != "pending":
-        return {"error": f"Draft {draft_id} is already {d['status']}"}
-    # The tool asks for confirmation itself, so nothing is ever sent without the user's yes.
-    if not await ctx.confirm(_draft_preview(d)):
-        return {"sent": False, "draft_id": draft_id, "reason": "The user declined to send this draft."}
-    msg = build_message(
-        ctx.account.email, d["to_addrs"], d["cc_addrs"], d["subject"], d["body"],
-        d["reply_message_id"], d["reply_references"],
-    )
-    message_id = await asyncio.to_thread(
-        send_message, ctx.account.smtp_host, ctx.account.email, ctx.account.password, msg
-    )
-    async with connection() as conn:
-        await conn.execute(
-            "UPDATE drafts SET status = 'sent', smtp_message_id = %s, sent_at = now() WHERE id = %s",
-            (message_id, draft_id),
-        )
-    return {"sent": True, "draft_id": draft_id, "message_id": message_id, "to": d["to_addrs"]}
+    try:
+        draft = await request_approval(ctx.account, draft_id, ctx.conversation_id)
+    except DraftError as e:
+        return {"error": str(e)}
+    return {
+        "awaiting_user_approval": True,
+        "draft_id": draft_id,
+        "status": "Not sent. The user has been shown this draft and decides whether to send it.",
+        # Picked up by the agent loop and surfaced to the client as an approval request.
+        USER_APPROVAL_KEY: draft,
+    }
 
 
 TOOLS: dict[str, Callable[..., Awaitable[dict]]] = {
@@ -554,17 +527,8 @@ TOOLS: dict[str, Callable[..., Awaitable[dict]]] = {
 }
 
 
-# Tools that act on the outside world and must be confirmed by the user first.
-CONFIRM_TOOLS: set[str] = {"send_email"}
-
-
-async def confirmation_preview(ctx: ToolContext, name: str, arguments: str) -> dict | None:
-    """What a UI shows before a CONFIRM_TOOLS call runs (None if the call is invalid)."""
-    try:
-        d = await _load_draft(ctx, json.loads(arguments)["draft_id"])
-    except Exception:
-        return None
-    return _draft_preview(d) if d and d["status"] == "pending" else None
+# A tool result carrying this key asks the client for an explicit user decision.
+USER_APPROVAL_KEY = "requires_user_approval"
 
 
 async def call_tool(ctx: ToolContext, name: str, arguments: str) -> dict:
@@ -580,4 +544,5 @@ async def call_tool(ctx: ToolContext, name: str, arguments: str) -> dict:
 
 
 def render_observation(result: dict) -> str:
-    return truncate_tokens(json.dumps(result, default=str, ensure_ascii=False), OBSERVATION_MAX_TOKENS)
+    visible = {k: v for k, v in result.items() if k != USER_APPROVAL_KEY}
+    return truncate_tokens(json.dumps(visible, default=str, ensure_ascii=False), OBSERVATION_MAX_TOKENS)

@@ -352,15 +352,28 @@ def _summarize_observation(result: dict) -> str:
     return "ok"
 
 
-async def _confirm_draft(draft: dict) -> bool:
+async def _decide_drafts(account, drafts: list[dict]) -> None:
+    """The user's approve/reject decision. A web or mobile client would show buttons instead."""
     from rich.panel import Panel
 
-    lines = [f"[bold]To:[/] {', '.join(draft['to'])}"]
-    if draft.get("cc"):
-        lines.append(f"[bold]Cc:[/] {', '.join(draft['cc'])}")
-    lines += [f"[bold]Subject:[/] {draft['subject']}", "", draft["body"]]
-    console.print(Panel("\n".join(lines), title="Send this email?", border_style="yellow"))
-    return await asyncio.to_thread(typer.confirm, "Send it", default=False)
+    from email_agent.drafts import DraftError, approve_draft, reject_draft
+
+    for draft in drafts:
+        lines = [f"[bold]To:[/] {', '.join(draft['to'])}"]
+        if draft.get("cc"):
+            lines.append(f"[bold]Cc:[/] {', '.join(draft['cc'])}")
+        lines += [f"[bold]Subject:[/] {draft['subject']}", "", draft["body"]]
+        console.print(Panel("\n".join(lines), title=f"Send draft #{draft['draft_id']}?", border_style="yellow"))
+        approved = await asyncio.to_thread(typer.confirm, "Send it", default=False)
+        try:
+            if approved:
+                await approve_draft(account, draft["draft_id"])
+                console.print("[green]Sent.[/]")
+            else:
+                await reject_draft(account, draft["draft_id"])
+                console.print("Not sent.")
+        except DraftError as e:
+            console.print(f"[red]{e}[/]")
 
 
 async def _render_turn(agent, question: str, verbose: bool) -> None:
@@ -372,12 +385,12 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
 
     status = console.status("Thinking...")
     status.start()
+    approvals: list[dict] = []
     try:
         async for event in agent.run(question):
             if isinstance(event, ConfirmationRequired):
-                status.stop()  # the confirmation prompt needs a clean terminal
-                continue
-            if isinstance(event, Thought):
+                approvals.append(event.draft)
+            elif isinstance(event, Thought):
                 console.print(Markdown(event.text, style="dim italic"))
             elif isinstance(event, ToolCall):
                 args = ", ".join(f"{k}={v!r}" for k, v in event.arguments.items() if v is not None)
@@ -410,6 +423,8 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
                 status.start()
     finally:
         status.stop()
+    if approvals:
+        await _decide_drafts(agent.account, approvals)
 
 
 @app.command()
@@ -423,7 +438,7 @@ def ask(
     from email_agent.agent.loop import Agent
 
     async def main():
-        agent = Agent(await get_account(account), confirm=_confirm_draft)
+        agent = Agent(await get_account(account))
         await _render_turn(agent, question, verbose)
 
     _run(main())
@@ -431,22 +446,39 @@ def ask(
 
 @app.command()
 def chat(
+    resume: str = typer.Option(None, "--resume", help="Continue a saved conversation by id"),
+    list_: bool = typer.Option(False, "--list", help="List recent conversations"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print full tool observations"),
     account: str = typer.Option(None, help="Account email if several are connected"),
 ) -> None:
-    """Multi-turn conversation with the agent. Type 'exit' to quit."""
+    """Multi-turn conversation with the agent (saved; resumable). Type 'exit' to quit."""
+    from email_agent import conversations
     from email_agent.accounts import get_account
     from email_agent.agent.loop import Agent
+    from email_agent.drafts import pending_drafts
 
     async def main():
-        agent = Agent(await get_account(account), confirm=_confirm_draft)
-        console.print(f"Chatting about [bold]{agent.account.email}[/]. Type 'exit' to quit.")
+        acct = await get_account(account)
+        if list_:
+            table = Table("updated", "title")
+            table.add_column("id (use with --resume)", no_wrap=True, min_width=36)
+            for c in await conversations.recent(acct.id):
+                table.add_row(f"{c['updated_at']:%Y-%m-%d %H:%M}", c["title"], str(c["id"]))
+            console.print(table)
+            return
+        agent = Agent(acct, conversation_id=resume)
+        console.print(f"Chatting about [bold]{acct.email}[/]. Type 'exit' to quit.")
+        if waiting := await pending_drafts(acct):
+            console.print(f"{len(waiting)} draft(s) are waiting for your decision.")
+            await _decide_drafts(acct, waiting)
         while True:
             question = (await asyncio.to_thread(console.input, "\n[bold green]you>[/] ")).strip()
             if question.lower() in {"exit", "quit", ":q"}:
-                return
+                break
             if question:
                 await _render_turn(agent, question, verbose)
+        if agent.conversation_id:
+            console.print(f"[dim]Resume with: email-agent chat --resume {agent.conversation_id}[/]")
 
     _run(main())
 

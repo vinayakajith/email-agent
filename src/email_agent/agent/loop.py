@@ -11,12 +11,13 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 from psycopg.types.json import Jsonb
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
+from email_agent import conversations
 from email_agent.accounts import Account
 from email_agent.agent import tools as agent_tools
 from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, Observation, Thought, ToolCall
@@ -27,11 +28,18 @@ from email_agent.prompt_cache import CACHE_OPTIONS, cache_key, text_message, usa
 
 log = logging.getLogger(__name__)
 CITATION_RE = re.compile(r"\[#(\d+)\]")
-ConfirmFn = Callable[[dict], Awaitable[bool]]
 
 
 class Agent:
-    def __init__(self, account: Account, confirm: ConfirmFn = agent_tools.deny_all, client: AsyncOpenAI | None = None):
+    """One conversation with the agent, persisted server-side.
+
+    `Agent(account)` starts a new conversation; `Agent(account, conversation_id)` resumes one
+    from any process or device. History is append-only and only committed at consistent
+    points (a step's tool calls together with their outputs), so a crash mid-step never
+    leaves a stored conversation the API would reject.
+    """
+
+    def __init__(self, account: Account, conversation_id: uuid.UUID | str | None = None, client: AsyncOpenAI | None = None):
         s = get_settings()
         self.account = account
         self.client = client or AsyncOpenAI(api_key=s.openai_api_key)
@@ -39,14 +47,34 @@ class Agent:
         self.max_steps = s.agent_max_steps
         self.reasoning = {"effort": s.agent_reasoning_effort, "summary": "auto"} if s.agent_reasoning_effort else None
         self.tz = s.tz
-        self.ctx = agent_tools.ToolContext(account, confirm)
-        self.conversation_id = uuid.uuid4()
-        # Full Responses API input, append-only across steps and turns so every request's prefix
-        # matches the previous one. The static system prompt comes first and ends in a breakpoint
-        # shared by all conversations of this account.
-        self.history: list[dict] = [
-            text_message("developer", system_prompt(account.email), breakpoint=True)
-        ]
+        self.conversation_id = uuid.UUID(str(conversation_id)) if conversation_id else None
+        self.ctx = agent_tools.ToolContext(account, self.conversation_id)
+        # Full Responses API input: the static system prompt first (ending in a cache breakpoint
+        # shared by all conversations of the account), then every turn, append-only.
+        self.history: list[dict] = []
+        self._committed = 0
+        self._loaded = False
+
+    async def _open(self, question: str) -> None:
+        """Create, load, or catch up the conversation before a turn."""
+        if self.conversation_id is None:
+            self.conversation_id = await conversations.create(self.account.id, question)
+            self.history = [text_message("developer", system_prompt(self.account.email), breakpoint=True)]
+            await conversations.append(self.conversation_id, self.history)
+        elif not self._loaded:
+            if await conversations.get(self.account.id, self.conversation_id) is None:
+                raise ValueError(f"No conversation {self.conversation_id} for this account")
+            self.history = await conversations.items(self.conversation_id)
+        else:
+            # Items appended elsewhere, e.g. the outcome of a draft approved on another device.
+            self.history += await conversations.items(self.conversation_id, after=self._committed)
+        self._committed = len(self.history)
+        self._loaded = True
+        self.ctx.conversation_id = self.conversation_id
+
+    async def _commit(self) -> None:
+        await conversations.append(self.conversation_id, self.history[self._committed:])
+        self._committed = len(self.history)
 
     # Background ingestion shares the OpenAI rate limits; an interactive turn waits it out
     # instead of failing.
@@ -76,6 +104,7 @@ class Agent:
 
     async def run(self, question: str) -> AsyncIterator[Event]:
         started = time.monotonic()
+        await self._open(question)
         self.history.append(text_message("developer", await turn_context(self.account.id, self.tz), breakpoint=False))
         # Breakpoint after the question: later steps and turns all extend this prefix.
         self.history.append(text_message("user", question, breakpoint=True))
@@ -107,6 +136,7 @@ class Agent:
 
                 if not calls:
                     answer = resp.output_text.strip()
+                    await self._commit()
                     cited = sorted({int(m) for m in CITATION_RE.findall(answer)})
                     yield emit(FinalAnswer(answer, cited, step, usage["in"], usage["out"], usage["cached"], usage["cache_write"]))
                     return
@@ -118,28 +148,20 @@ class Agent:
                         args = {"_raw": c.arguments}
                     yield emit(ToolCall(step, c.call_id, c.name, args))
 
-                # Tools needing human confirmation run one at a time; the rest run concurrently.
-                results: dict[str, dict] = {}
-                parallel = [c for c in calls if c.name not in agent_tools.CONFIRM_TOOLS]
-                outputs = await asyncio.gather(
-                    *(agent_tools.call_tool(self.ctx, c.name, c.arguments) for c in parallel)
-                )
-                results.update({c.call_id: o for c, o in zip(parallel, outputs)})
-                for c in calls:
-                    if c.name in agent_tools.CONFIRM_TOOLS:
-                        preview = await agent_tools.confirmation_preview(self.ctx, c.name, c.arguments)
-                        if preview is not None:
-                            yield emit(ConfirmationRequired(step, preview))
-                        results[c.call_id] = await agent_tools.call_tool(self.ctx, c.name, c.arguments)
-
-                for c in calls:
-                    result = results[c.call_id]
+                outputs = await asyncio.gather(*(agent_tools.call_tool(self.ctx, c.name, c.arguments) for c in calls))
+                for c, result in zip(calls, outputs):
                     yield emit(Observation(step, c.call_id, c.name, result, error="error" in result))
                     self.history.append(
                         {"type": "function_call_output", "call_id": c.call_id,
                          "output": agent_tools.render_observation(result)}
                     )
+                await self._commit()
+                for result in outputs:
+                    if agent_tools.USER_APPROVAL_KEY in result:
+                        yield emit(ConfirmationRequired(step, result[agent_tools.USER_APPROVAL_KEY]))
         finally:
+            # Anything not committed (error, cancelled turn) is dropped so memory matches the store.
+            del self.history[self._committed:]
             await self._save(question, events, answer, usage, started)
 
     async def _save(self, question: str, events: list[Event], answer: str | None, usage: dict, started: float) -> None:

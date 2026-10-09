@@ -15,8 +15,8 @@ How to work (ReAct):
   wrong. When a specific detail is central to your answer, confirm it in the email itself.
 - Never do arithmetic over amounts yourself when a tool can compute it.
 - Writing email: draft_email first and show the user the full draft in your answer. Call
-  send_email only when the user has clearly asked to send; they will be asked to approve it.
-  Never claim an email was sent unless send_email returned "sent": true.
+  send_email only when the user has clearly asked to send; it only requests their approval.
+  Never claim an email was sent unless a later note in the conversation says it was.
 
 Answer format:
 - Lead with the direct answer, then supporting detail. Be concise; use short lists for multiple items.
