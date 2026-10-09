@@ -13,20 +13,28 @@ console = Console()
 
 
 def setup_logging(default: str = "WARNING") -> None:
+    """Console at `default` (or LOG_LEVEL); the rotating log file always keeps INFO and above."""
     import logging
+    from logging.handlers import RotatingFileHandler
 
     from rich.logging import RichHandler
 
-    from email_agent.config import get_settings
+    from email_agent.config import get_settings, log_file_path
 
-    level = (get_settings().log_level or default).upper()
-    logging.basicConfig(
-        level=level, format="%(name)s: %(message)s", force=True,
-        handlers=[RichHandler(console=console, show_path=False)],
-    )
+    s = get_settings()
+    console_level = logging.getLevelName((s.log_level or default).upper())
+    handlers: list[logging.Handler] = [RichHandler(console=console, show_path=False, level=console_level)]
+    path = log_file_path(s)
+    if path is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+        file_handler.setLevel(min(console_level, logging.INFO))
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+        handlers.append(file_handler)
+    logging.basicConfig(level=min(h.level for h in handlers), format="%(name)s: %(message)s", force=True, handlers=handlers)
     # Library chatter (HTTP requests, IMAP) stays out unless explicitly asked for.
     for noisy in ("httpx", "httpcore", "openai", "imapclient"):
-        logging.getLogger(noisy).setLevel(max(logging.WARNING, logging.getLogger().level))
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, console_level))
 
 
 @app.callback()
@@ -62,17 +70,60 @@ def db_migrate() -> None:
 
 
 @app.command()
-def doctor() -> None:
-    """Check the database, OpenAI and Voyage configuration."""
-    from email_agent.doctor import run_checks
+def health(
+    deep: bool = typer.Option(False, "--deep", help="Also check OpenAI and Voyage (makes small API calls)"),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable output"),
+) -> None:
+    """Developer health report. Exit code 1 if any check fails."""
+    import json
 
-    table = Table("check", "status", "detail")
-    checks = run_checks()
-    for c in checks:
-        table.add_row(c.name, "[green]ok[/]" if c.ok else "[red]FAIL[/]", c.detail)
-    console.print(table)
-    if not all(c.ok for c in checks):
+    from email_agent import health as h
+
+    checks = h.run(deep)
+    status = h.overall(checks)
+    if as_json:
+        print(json.dumps({"status": status, "summary": h.summary(checks), "checks": [vars(c) for c in checks]}))
+    else:
+        style = {"ok": "[green]ok[/]", "warn": "[yellow]warn[/]", "fail": "[red]FAIL[/]"}
+        table = Table("check", "status", "detail")
+        for c in checks:
+            table.add_row(c.name, style[c.status], c.detail)
+        console.print(table)
+        console.print(f"overall: {style[status]} · {h.summary(checks)['message']}")
+    if status == "fail":
         raise typer.Exit(1)
+
+
+@app.command()
+def doctor() -> None:
+    """Check configuration and API keys (same as `health --deep`)."""
+    health(deep=True, as_json=False)
+
+
+@app.command()
+def logs(
+    lines: int = typer.Option(50, "-n", help="How many recent lines"),
+    follow: bool = typer.Option(False, "-f", "--follow", help="Keep printing new lines"),
+) -> None:
+    """Show the application log (worker and commands)."""
+    import time
+    from collections import deque
+
+    from email_agent.config import get_settings, log_file_path
+
+    path = log_file_path(get_settings())
+    if path is None or not path.exists():
+        console.print("No log file yet (logging to a file is off, or nothing has run).")
+        return
+    with path.open(encoding="utf-8", errors="replace") as f:
+        for line in deque(f, maxlen=lines):
+            print(line, end="")
+        while follow:
+            line = f.readline()
+            if line:
+                print(line, end="", flush=True)
+            else:
+                time.sleep(0.5)
 
 
 @app.command()
@@ -683,7 +734,12 @@ def status(account: str = typer.Option(None, help="Account email if several are 
         acct = await get_account(account)
         return acct, await stage_counts(acct.id), await jobs.live_workers(), await jobs.open_jobs(acct.id)
 
+    from email_agent import health as h
+
     acct, info, workers, open_jobs = _run(main())
+    summary = h.summary()
+    colour = {"ok": "green", "attention": "yellow", "down": "red"}[summary["status"]]
+    console.print(f"[{colour}]●[/] {summary['message']}")
     table = Table("stage", "emails")
     for stage in ("fetched", "enriched", "embedded"):
         table.add_row(stage, f"{info['stages'].get(stage, 0):,}")

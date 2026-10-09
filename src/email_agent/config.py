@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     dream_model: str = ""
     # Empty means: WARNING for interactive commands, INFO for the worker.
     log_level: str = ""
+    # Rotating log file; empty = <project>/logs/email-agent.log, "off" disables it.
+    log_file: str = ""
     # Passed as reasoning.effort to the agent model.
     agent_reasoning_effort: str = "medium"
 
@@ -90,3 +92,11 @@ def get_settings() -> Settings:
 
 def dream_model(s: Settings) -> str:
     return s.dream_model or s.openai_model
+
+
+def log_file_path(s: Settings):
+    from pathlib import Path
+
+    if s.log_file.lower() == "off":
+        return None
+    return Path(s.log_file) if s.log_file else Path(__file__).resolve().parents[2] / "logs" / "email-agent.log"

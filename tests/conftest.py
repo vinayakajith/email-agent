@@ -4,7 +4,7 @@ import os
 os.environ.update({
     "OPENAI_MODEL": "gpt-6-luna", "OPENAI_ENRICH_MODEL": "gpt-6-luna", "AGENT_REASONING_EFFORT": "medium",
     # Never read the developer's keychain from tests.
-    "OPENAI_API_KEY": "test-openai-key", "VOYAGE_API_KEY": "test-voyage-key",
+    "OPENAI_API_KEY": "test-openai-key", "VOYAGE_API_KEY": "test-voyage-key", "LOG_FILE": "off",
 })
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://email_agent:email_agent@localhost:5434/email_agent_test"
