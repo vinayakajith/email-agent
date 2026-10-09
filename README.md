@@ -13,20 +13,17 @@ Retrieval is hybrid: BM25 + vector → reciprocal rank fusion → rerank.
 
 ```bash
 docker compose up -d            # Postgres on localhost:5434
-cp .env.example .env            # add OPENAI_API_KEY and VOYAGE_API_KEY
 uv sync
 uv run email-agent db migrate
-uv run email-agent doctor       # every row should be green
+uv run email-agent setup        # API keys → Gmail → your profile → first ingest (resumable)
+uv run email-agent worker       # keep running: new mail, retries, nightly dreaming
 ```
 
-## Connect Gmail
-
-Turn on 2-Step Verification, create an app password at
-https://myaccount.google.com/apppasswords, and make sure IMAP is enabled in Gmail settings.
-
-```bash
-uv run email-agent connect      # tests IMAP + SMTP, stores the password in the macOS Keychain
-```
+`setup` checks each API key with a cheap call and stores it in the OS keychain. Environment
+variables (`.env`) still take precedence. For Gmail it asks for an app password: turn on
+2-Step Verification, create one at https://myaccount.google.com/apppasswords, and make sure
+IMAP is enabled. Your profile (name, timezone, one line about you) is the only thing that goes
+into every conversation's system prompt. Edit it with `email-agent profile`.
 
 ## Ingest and keep up to date
 
@@ -68,6 +65,45 @@ being processed.
 approval. You approve or reject it, the email is sent only on approval, and the outcome is
 added to the conversation.
 
+## Memory and dreaming
+
+| Kind | Written by | When |
+|---|---|---|
+| Your notes | the chat agent | only when you explicitly ask: "remember…", "forget…" |
+| Insights | the nightly dream | after 3 am (your timezone), only if you chatted since the last dream |
+
+The agent reads both through a `get_user_context` tool when personal context helps. Each turn
+gets one line saying how many notes exist; nothing else is added to the prompt.
+
+**Dreaming** consolidates your recent conversations into insights: it merges duplicates, lets
+newer information win, and drops trivia and secrets. Guards:
+- **Poisoning guard:** it reads only your messages and the assistant's answers, never tool
+  output or raw email content, so instructions hidden in an email can't become memory.
+- **Ownership:** it only edits its own insights, never your notes.
+- **Shrink guard:** it refuses a result that would shrink the insights by more than half.
+- **Reversible:** every change is versioned.
+
+```bash
+uv run email-agent memory list          # your notes + insights
+uv run email-agent memory history       # every change, with the dream job that made it
+uv run email-agent memory forget <topic>
+uv run email-agent dream --now          # consolidate now (no-op if nothing new)
+uv run email-agent memory rollback <job>
+```
+
+## Health and logs
+
+```bash
+uv run email-agent status               # one line for humans, e.g. "Up to date · synced 2 min ago"
+uv run email-agent health [--json]      # developer report; exit code 1 if anything fails
+uv run email-agent doctor               # health + live OpenAI/Voyage checks
+uv run email-agent logs -f              # tail logs/email-agent.log (rotating)
+```
+
+Health derives everything from state the app already records (worker heartbeats, sync times,
+job rows, unprocessed mail, dream backlog, pending drafts). Per-turn and per-job detail lives
+in `agent_runs` and `ingest_jobs`.
+
 ## Architecture
 
 ```
@@ -77,10 +113,12 @@ added to the conversation.
  ┌──────────────────────── Postgres (only stateful service) ─────────────────────────┐
  │ ingest_jobs (queue) · workers · emails · email_facts · chunks (BM25 + HNSW)        │
  │ conversations · conversation_items · drafts · agent_runs                           │
+ │ user_profile · memories · memory_versions                                          │
  └────────────────────────────────────────────────────────────────────────────────────┘
    ▲  claim (FOR UPDATE SKIP LOCKED), heartbeat, progress
    │
  worker process(es): IMAP IDLE watchers → enqueue sync · runners → fetch → extract → embed
+                     dream scheduler (3 am local, only with new messages) → dream job
 ```
 
 - **Chat is isolated from ingestion.** The worker is a separate process. Chunks and facts are
@@ -99,7 +137,8 @@ added to the conversation.
 | Extract | OpenAI structured outputs: category, priority, needs-action, amounts (total vs minimum due), merchant, due dates, recurrence. Versioned; `reenrich` upgrades old facts |
 | Embed | Header-prefixed ~600-token chunks → `voyage-4-large` (1024-d) into pgvector HNSW + pg_search BM25 |
 | Search | BM25 top-50 ∥ vector top-50 → reciprocal rank fusion → best chunk per email → `rerank-3` |
-| Agent | Hand-written ReAct loop on the OpenAI Responses API with tools `search_emails`, `filter_emails`, `get_email`, `get_thread`, `aggregate_spend`, `list_subscriptions`, `draft_email`, `send_email` (approval request only) |
+| Agent | Hand-written ReAct loop on the OpenAI Responses API with tools `search_emails`, `filter_emails`, `get_email`, `get_thread`, `aggregate_spend`, `list_subscriptions`, `draft_email`, `send_email` (approval request only), `get_user_context`, `save_memory`, `delete_memory` |
+| Dream | Nightly worker job: new user/assistant messages + current insights → one structured call → versioned insight updates |
 
 Totals and triage use the extracted facts via SQL. Repeated reminders for the same bill are
 merged by due date, so "how much do I owe" is an exact sum with line items.
