@@ -102,9 +102,9 @@ TOOL_SCHEMAS = [
     _fn(
         "aggregate_spend",
         "Exact totals of money amounts extracted from emails. Always use this for totals instead of "
-        "adding numbers yourself. Totals are per currency. Repeated emails about the same bill "
-        "(statement, reminders, 'pay now' nudges from apps like CRED) are merged into one line item "
-        "using the latest amount; each line item lists all its email ids.",
+        "adding numbers yourself. Totals are per currency. Several emails about the same bill "
+        "(statement, reminders, third-party payment nudges) are merged into one line item using the "
+        "latest amount; each line item lists all its email ids.",
         {
             "kind": {
                 "type": "string",
@@ -300,8 +300,8 @@ async def get_thread(ctx: ToolContext, thread_id):
 
 
 SPEND_KIND_SQL = {
-    "credit_card_bill": "f.is_credit_card_bill",
-    "bill": "f.category = 'bill' AND f.amount_type = 'amount_due'",
+    "credit_card_bill": "f.is_credit_card_bill AND f.amount_type IN ('amount_due', 'minimum_due')",
+    "bill": "f.category = 'bill' AND f.amount_type IN ('amount_due', 'minimum_due')",
     "receipt": "f.category IN ('receipt', 'shipping', 'travel', 'banking') AND f.amount_type = 'charged'",
     "subscription": "(f.category = 'subscription' OR f.is_recurring) AND f.amount_type IN ('charged', 'amount_due')",
     "refund": "f.amount_type = 'refund'",
@@ -373,12 +373,14 @@ async def aggregate_spend(ctx: ToolContext, kind, date_from, date_to, date_basis
     async with connection() as conn:
         rows = await (await conn.execute(
             f"""SELECT e.id AS email_id, e.sent_at::date AS date, COALESCE(f.merchant, e.from_addr) AS merchant,
-                       f.amount, COALESCE(f.currency, '???') AS currency, f.due_date, e.subject
+                       f.amount, COALESCE(f.currency, '???') AS currency, f.due_date, e.subject, f.amount_type
                 FROM emails e JOIN email_facts f ON f.email_id = e.id
                 WHERE {' AND '.join(where)}""",
             params,
         )).fetchall()
-    items = merge_repeats(rows, bills)
+    # A bill whose total is unknown (only the minimum due was stated) cannot be summed honestly.
+    minimum_only = merge_repeats([r for r in rows if r["amount_type"] == "minimum_due"], bills)
+    items = merge_repeats([r for r in rows if r["amount_type"] != "minimum_due"], bills)
     totals: dict[str, Decimal] = {}
     groups: dict[tuple[str, str], Decimal] = {}
     for it in items:
@@ -398,6 +400,14 @@ async def aggregate_spend(ctx: ToolContext, kind, date_from, date_to, date_basis
                                "earlier_amounts": [float(a) for a in it.get("earlier_amounts", [])]})
                        for it in items[:60]],
     }
+    if minimum_only:
+        result["bills_with_only_minimum_due"] = [
+            _clean({**it, "minimum_due": float(it.pop("amount")), "earlier_amounts": []}) for it in minimum_only
+        ]
+        result["note_on_minimum_due"] = (
+            "These bills state only a minimum amount due (total missing from the email); they are NOT in "
+            "the totals. Mention them separately."
+        )
     if any("earlier_amounts" in it for it in items):
         result["note_on_amounts"] = (
             "Some bills changed amount across emails (often a partial payment, or two cards from the same "

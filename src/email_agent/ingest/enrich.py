@@ -17,6 +17,9 @@ from email_agent.config import get_settings
 from email_agent.db.pool import connection
 
 MAX_BODY_TOKENS = 2_000
+# Bump whenever EmailFacts or INSTRUCTIONS change meaning; `email-agent reenrich` then re-extracts
+# facts produced by older versions so stored data matches the current definitions.
+EXTRACTOR_VERSION = 2
 PAGE_SIZE = 200
 _enc = tiktoken.get_encoding("o200k_base")
 
@@ -41,7 +44,10 @@ class EmailFacts(BaseModel):
     action_summary: str | None = Field(description="Imperative one-liner of what to do, or null.")
     deadline: str | None = Field(description="YYYY-MM-DD by which action is needed, or null.")
     amount: float | None = Field(description="The main money amount, as a plain number, or null.")
-    amount_type: Literal["amount_due", "charged", "refund", "balance", "other"] | None
+    amount_type: Literal["amount_due", "minimum_due", "charged", "refund", "balance", "other"] | None = Field(
+        description="amount_due = the TOTAL due on a bill; minimum_due = only when the total is missing "
+        "and the email gives just the minimum amount due."
+    )
     currency: str | None = Field(description="ISO 4217 code, e.g. USD, INR, EUR; null if no amount.")
     merchant: str | None = Field(description="Company or service the money relates to, e.g. 'Netflix'.")
     is_recurring: bool = Field(description="True for subscription or other recurring charges.")
@@ -54,7 +60,10 @@ class EmailFacts(BaseModel):
 INSTRUCTIONS = """You extract structured facts from one email in {owner}'s mailbox.
 Be literal: use only what the email states. Use null when a field does not apply or is unknown.
 Resolve relative dates ("by Friday") against the email's date. Amounts are plain numbers
-without symbols or thousands separators. If the email was sent by {owner}, needs_action is false."""
+without symbols or thousands separators. If the email was sent by {owner}, needs_action is false.
+Only record amounts the email actually states; text that is not a real number (e.g. an
+unfilled template field) is not an amount. For a bill, amount is the total due; when the total
+is not stated but a minimum due is, record that with amount_type "minimum_due"."""
 
 
 def truncate_tokens(text: str, max_tokens: int) -> str:
@@ -118,11 +127,12 @@ class Enricher:
 SAVE_FACTS = """
 INSERT INTO email_facts (
     email_id, category, priority, needs_action, action_summary, deadline, amount, amount_type,
-    currency, merchant, is_recurring, billing_period, due_date, is_credit_card_bill, summary, model
+    currency, merchant, is_recurring, billing_period, due_date, is_credit_card_bill, summary, model,
+    extractor_version
 ) VALUES (
     %(email_id)s, %(category)s, %(priority)s, %(needs_action)s, %(action_summary)s, %(deadline)s,
     %(amount)s, %(amount_type)s, %(currency)s, %(merchant)s, %(is_recurring)s, %(billing_period)s,
-    %(due_date)s, %(is_credit_card_bill)s, %(summary)s, %(model)s
+    %(due_date)s, %(is_credit_card_bill)s, %(summary)s, %(model)s, %(extractor_version)s
 )
 ON CONFLICT (email_id) DO UPDATE SET
     category = EXCLUDED.category, priority = EXCLUDED.priority, needs_action = EXCLUDED.needs_action,
@@ -130,7 +140,8 @@ ON CONFLICT (email_id) DO UPDATE SET
     amount_type = EXCLUDED.amount_type, currency = EXCLUDED.currency, merchant = EXCLUDED.merchant,
     is_recurring = EXCLUDED.is_recurring, billing_period = EXCLUDED.billing_period,
     due_date = EXCLUDED.due_date, is_credit_card_bill = EXCLUDED.is_credit_card_bill,
-    summary = EXCLUDED.summary, model = EXCLUDED.model, extracted_at = now()
+    summary = EXCLUDED.summary, model = EXCLUDED.model, extractor_version = EXCLUDED.extractor_version,
+    extracted_at = now()
 """
 
 
@@ -142,6 +153,7 @@ def facts_row(email_id: int, f: EmailFacts, model: str) -> dict:
         "due_date": _date(f.due_date),
         "currency": f.currency.upper()[:3] if f.currency else None,
         "model": model,
+        "extractor_version": EXTRACTOR_VERSION,
     }
 
 

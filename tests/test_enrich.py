@@ -41,3 +41,18 @@ def test_render_email_without_date():
         "labels": [], "attachments": [], "list_unsubscribe": None, "body_text": "hi",
     })
     assert "Date: unknown" in text
+
+
+async def test_stale_facts_are_reextracted(ingested):
+    from email_agent.ingest.enrich import EXTRACTOR_VERSION
+    from email_agent.ingest.pipeline import mark_stale_facts, process_stages, start_job
+
+    async with connection() as conn:
+        await conn.execute("UPDATE email_facts SET extractor_version = %s", (EXTRACTOR_VERSION - 1,))
+    assert await mark_stale_facts(ingested) == len(MAILBOX) - 1
+    await process_stages(ingested, await start_job(ingested, "sync", None), lambda *a: None)
+    async with connection() as conn:
+        versions = await (await conn.execute("SELECT DISTINCT extractor_version AS v FROM email_facts")).fetchall()
+        stages = await (await conn.execute("SELECT stage, count(*) AS n FROM emails GROUP BY stage")).fetchall()
+    assert versions == [{"v": EXTRACTOR_VERSION}]
+    assert {r["stage"]: r["n"] for r in stages} == {"embedded": len(MAILBOX) - 1, "fetched": 1}

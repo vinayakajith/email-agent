@@ -109,3 +109,12 @@ async def test_errors_become_observations(ingested):
     assert "error" in await run(ingested, "get_email", email_id=123456)
     assert "error" in await run(ingested, "aggregate_spend", kind="bill", date_from="not-a-date", date_to="2026-01-01")
     assert "error" in await call_tool(ToolContext(ingested), "nope", "{}")
+
+
+async def test_minimum_due_only_bills_are_listed_but_not_summed(ingested):
+    await _add_bill(ingested, 400, "2026-10-08", "ICICI Bank", 4040, None, sender="info@icici.bank.in")
+    async with connection() as conn:
+        await conn.execute("UPDATE email_facts SET amount_type = 'minimum_due' WHERE amount = 4040")
+    res = await run(ingested, "aggregate_spend", kind="credit_card_bill", date_from="2026-10-01", date_to="2026-10-31")
+    assert res["totals_by_currency"] == {"INR": 12450.0}
+    assert [b["minimum_due"] for b in res["bills_with_only_minimum_due"]] == [4040.0]

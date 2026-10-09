@@ -177,6 +177,23 @@ async def process_stages(account: Account, job_id: int, progress: Progress = _no
     await embed_stage(account, job_id, progress)
 
 
+async def mark_stale_facts(account: Account) -> int:
+    """Send emails whose facts came from an older extractor back through enrich + embed.
+
+    Chunks embed the extracted summary, so they are rebuilt too.
+    """
+    from email_agent.ingest.enrich import EXTRACTOR_VERSION
+
+    async with connection() as conn:
+        cur = await conn.execute(
+            """UPDATE emails e SET stage = 'fetched'
+               FROM email_facts f
+               WHERE f.email_id = e.id AND e.account_id = %s AND f.extractor_version < %s""",
+            (account.id, EXTRACTOR_VERSION),
+        )
+        return cur.rowcount
+
+
 async def run_ingest(account: Account, plan: FetchPlan, since: date | None, progress: Progress = _noop) -> int:
     job_id = await start_job(account, "since" if since else "full", since)
     try:

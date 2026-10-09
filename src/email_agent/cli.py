@@ -145,31 +145,70 @@ def ingest(
     _run(main())
 
 
+async def _process_pending(acct) -> None:
+    """Run enrich + embed over whatever is pending, with progress bars and a job record."""
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+    from email_agent.ingest.pipeline import finish_job, process_stages, start_job
+
+    job_id = await start_job(acct, "sync", None)
+    with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
+        tasks: dict[str, int] = {}
+
+        def progress(stage: str, done: int, total: int) -> None:
+            if stage not in tasks:
+                tasks[stage] = bar.add_task(stage, total=total)
+            bar.update(tasks[stage], completed=done, total=total)
+
+        try:
+            await process_stages(acct, job_id, progress)
+        except BaseException as e:
+            await finish_job(job_id, f"{type(e).__name__}: {e}")
+            raise
+    await finish_job(job_id)
+
+
 @app.command()
 def resume(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
     """Finish extraction and embedding for emails left behind by an interrupted ingest."""
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
-
     from email_agent.accounts import get_account
-    from email_agent.ingest.pipeline import finish_job, process_stages, start_job
+
+    async def main():
+        await _process_pending(await get_account(account))
+
+    _run(main())
+
+
+@app.command()
+def reenrich(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+    account: str = typer.Option(None, help="Account email if several are connected"),
+) -> None:
+    """Re-extract facts made by an older extractor version (after the extraction schema changes)."""
+    from email_agent.accounts import get_account
+    from email_agent.db.pool import connection
+    from email_agent.ingest.enrich import EXTRACTOR_VERSION
+    from email_agent.ingest.pipeline import mark_stale_facts
 
     async def main():
         acct = await get_account(account)
-        job_id = await start_job(acct, "sync", None)
-        with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
-            tasks: dict[str, int] = {}
-
-            def progress(stage: str, done: int, total: int) -> None:
-                if stage not in tasks:
-                    tasks[stage] = bar.add_task(stage, total=total)
-                bar.update(tasks[stage], completed=done, total=total)
-
-            try:
-                await process_stages(acct, job_id, progress)
-            except BaseException as e:
-                await finish_job(job_id, f"{type(e).__name__}: {e}")
-                raise
-        await finish_job(job_id)
+        async with connection() as conn:
+            stale = (await (await conn.execute(
+                """SELECT count(*) AS n FROM email_facts f JOIN emails e ON e.id = f.email_id
+                   WHERE e.account_id = %s AND f.extractor_version < %s""",
+                (acct.id, EXTRACTOR_VERSION),
+            )).fetchone())["n"]
+        if not stale:
+            console.print(f"All facts are already at extractor version {EXTRACTOR_VERSION}.")
+            return
+        console.print(
+            f"{stale:,} emails have facts from an older extractor; they will be re-extracted (OpenAI) "
+            f"and re-embedded (Voyage)."
+        )
+        if not (yes or await asyncio.to_thread(typer.confirm, "Continue?", default=True)):
+            return
+        await mark_stale_facts(acct)
+        await _process_pending(acct)
 
     _run(main())
 
@@ -291,7 +330,7 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
                 status.stop()  # the confirmation prompt needs a clean terminal
                 continue
             if isinstance(event, Thought):
-                console.print(f"[dim italic]thought: {escape(event.text)}[/]")
+                console.print(Markdown(event.text, style="dim italic"))
             elif isinstance(event, ToolCall):
                 args = ", ".join(f"{k}={v!r}" for k, v in event.arguments.items() if v is not None)
                 console.print(f"[cyan]-> {event.name}({escape(args)})[/]")
