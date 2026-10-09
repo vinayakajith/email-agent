@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 HEARTBEAT_SECONDS = 30
 
 
-async def _dispatch(job: dict) -> None:
+async def _dispatch(job: dict) -> dict | None:
     account = await get_account_by_id(job["account_id"])
     job_id = job["id"]
 
@@ -29,8 +29,13 @@ async def _dispatch(job: dict) -> None:
     elif mode == "reenrich":
         await pipeline.mark_stale_facts(account)
         await pipeline.process_stages(account, job_id, progress)
+    elif mode == "dream":
+        from email_agent import dream
+
+        return await dream.run_dream(account, job_id)
     else:
         raise jobs.PermanentJobError(f"unknown job mode {mode!r}")
+    return None
 
 
 async def _keep_alive(job_id: int) -> None:
@@ -46,7 +51,7 @@ async def run_job(job: dict) -> str:
     log.info("job %s: %s for account %s started (attempt %s)", job_id, job["mode"], job["account_id"], job["attempts"])
     beat = asyncio.create_task(_keep_alive(job_id))
     try:
-        await _dispatch(job)
+        result = await _dispatch(job)
     except asyncio.CancelledError:
         status = await asyncio.shield(jobs.release(job_id))
         log.info("job %s: cancelled, now %s", job_id, status)
@@ -62,7 +67,7 @@ async def run_job(job: dict) -> str:
         beat.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await beat
-    await jobs.finish(job_id)
+    await jobs.finish(job_id, result)
     log.info("job %s: done", job_id)
     return "done"
 

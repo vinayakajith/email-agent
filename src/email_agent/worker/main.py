@@ -27,6 +27,7 @@ IDLE_POLL_SECONDS = 2  # how often an idle runner checks the queue
 HEARTBEAT_SECONDS = 10
 ACCOUNT_RESCAN_SECONDS = 60
 REAP_SECONDS = 60
+DREAM_CHECK_SECONDS = 300
 
 
 async def watchable_accounts() -> list[Account]:
@@ -80,6 +81,21 @@ class Worker:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.stopping.wait(), seconds)
 
+    async def _schedule_dreams(self) -> None:
+        """Queue tonight's dream for accounts with new messages (see dream.is_due)."""
+        from email_agent import dream, profile
+
+        s = get_settings()
+        if not s.dream_enabled:
+            return
+        async with connection() as conn:
+            account_ids = [r["id"] for r in await (await conn.execute("SELECT id FROM accounts")).fetchall()]
+        for account_id in account_ids:
+            user = await profile.get(account_id)
+            if await dream.is_due(account_id, user.timezone if user else s.tz, s.dream_hour):
+                log.info("queueing dream for account %s", account_id)
+                await jobs.enqueue(account_id, "dream")
+
     async def _reap(self) -> None:
         await jobs.requeue_stale()
         await jobs.prune_workers()
@@ -114,6 +130,7 @@ class Worker:
             asyncio.create_task(self._every(HEARTBEAT_SECONDS, lambda: jobs.worker_heartbeat(self.id))),
             asyncio.create_task(self._every(ACCOUNT_RESCAN_SECONDS, self._sync_watchers)),
             asyncio.create_task(self._every(REAP_SECONDS, self._reap)),
+            asyncio.create_task(self._every(DREAM_CHECK_SECONDS, self._schedule_dreams)),
             asyncio.create_task(self._delayed_poll()),
         ]
         runners = [asyncio.create_task(self._runner(i)) for i in range(self.concurrency)]

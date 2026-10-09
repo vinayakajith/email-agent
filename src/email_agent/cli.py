@@ -242,6 +242,28 @@ def memory_history(topic: str = typer.Argument(None), limit: int = typer.Option(
     console.print(table)
 
 
+@app.command()
+def dream(now: bool = typer.Option(False, "--now", help="Run tonight's consolidation right away")) -> None:
+    """Memory consolidation ("dreaming"). Runs nightly in the worker; --now runs it immediately."""
+    from email_agent import dream as dreaming
+    from email_agent.accounts import get_account
+
+    async def main():
+        acct = await get_account()
+        last = await dreaming.last_success(acct.id)
+        when = f"{last['finished_at']:%Y-%m-%d %H:%M}" if last else "never"
+        pending = await dreaming.new_user_messages(acct.id, last["started_at"] if last else None)
+        console.print(f"Last dream: {when}. New messages since: {pending}.")
+        if not now:
+            return
+        if not pending:
+            console.print("Nothing new to consolidate, so no dream.")
+            return
+        await _submit(acct, "dream")
+
+    _run(main())
+
+
 @memory_app.command("rollback")
 def memory_rollback(job_id: int) -> None:
     """Undo everything one dream changed."""
@@ -359,6 +381,19 @@ async def _submit(acct, mode: str, since: date | None = None) -> None:
     if job["status"] == "failed":
         console.print(f"[red]Job #{job_id} failed:[/] {job['error']}")
         raise typer.Exit(1)
+    if mode == "dream":
+        r = job["result"] or {}
+        if "skipped" in r:
+            console.print(f"Dream #{job_id}: {r['skipped']}.")
+        else:
+            c = r["changes"]
+            changed = c["create"] + c["update"] + c["delete"]
+            console.print(
+                f"[green]Dream #{job_id} done[/] ({r['conversations']} conversations): {c['create']} new, "
+                f"{c['update']} updated, {c['delete']} removed insight(s). {r['summary']}"
+                + (f"\nUndo with: email-agent memory rollback {job_id}" if changed else "")
+            )
+        return
     console.print(
         f"[green]Job #{job_id} done.[/] fetched {job['fetched']:,} · extracted {job['enriched']:,} · embedded {job['embedded']:,}"
     )

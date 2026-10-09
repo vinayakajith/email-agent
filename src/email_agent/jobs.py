@@ -13,6 +13,7 @@ import socket
 from datetime import date
 
 from psycopg.errors import UniqueViolation
+from psycopg.types.json import Jsonb
 
 from email_agent.db.pool import connection
 
@@ -21,7 +22,7 @@ log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 5
 STALE_AFTER = "5 minutes"
 WORKER_ALIVE_WITHIN = "30 seconds"
-MODES = ("full", "since", "sync", "process", "reenrich")
+MODES = ("full", "since", "sync", "process", "reenrich", "dream")
 
 
 class PermanentJobError(Exception):
@@ -87,11 +88,12 @@ async def progress(job_id: int, stage: str, done: int, total: int) -> None:
         )
 
 
-async def finish(job_id: int) -> None:
+async def finish(job_id: int, result: dict | None = None) -> None:
     async with connection() as conn:
         await conn.execute(
-            "UPDATE ingest_jobs SET status = 'done', finished_at = now(), heartbeat_at = now() WHERE id = %s",
-            (job_id,),
+            """UPDATE ingest_jobs SET status = 'done', finished_at = now(), heartbeat_at = now(), result = %s
+               WHERE id = %s""",
+            (Jsonb(result) if result is not None else None, job_id),
         )
 
 

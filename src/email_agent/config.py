@@ -2,7 +2,7 @@ import os
 import re
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Fixed for v1: no provider or model switching for retrieval.
@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # interval that catches anything IMAP IDLE missed and refreshes read/starred state.
     worker_concurrency: int = 1
     worker_poll_minutes: int = 10
+    # Nightly memory consolidation ("dreaming"), in the user's timezone. Empty model = agent model.
+    dream_enabled: bool = True
+    dream_hour: int = 3
+    dream_model: str = ""
     # Empty means: WARNING for interactive commands, INFO for the worker.
     log_level: str = ""
     # Passed as reasoning.effort to the agent model.
@@ -61,9 +65,11 @@ class Settings(BaseSettings):
             self.voyage_api_key = secrets_store.get("voyage_api_key") or ""
         return self
 
-    @field_validator("openai_model", "openai_enrich_model")
+    @field_validator("openai_model", "openai_enrich_model", "dream_model")
     @classmethod
-    def _gpt6_class(cls, v: str) -> str:
+    def _gpt6_class(cls, v: str, info: ValidationInfo) -> str:
+        if v == "" and info.field_name == "dream_model":
+            return v  # falls back to the agent model
         m = _GPT_MAJOR.match(v)
         if not m or int(m.group(1)) < MIN_GPT_MAJOR:
             raise ValueError(f"{v!r} is not supported; use a GPT-{MIN_GPT_MAJOR}-class model such as gpt-6-luna")
@@ -80,3 +86,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def dream_model(s: Settings) -> str:
+    return s.dream_model or s.openai_model
