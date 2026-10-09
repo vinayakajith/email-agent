@@ -18,9 +18,10 @@ from psycopg.types.json import Jsonb
 from email_agent.accounts import Account
 from email_agent.agent import tools as agent_tools
 from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, Observation, Thought, ToolCall
-from email_agent.agent.prompts import system_prompt
+from email_agent.agent.prompts import calendar_note, system_prompt
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
+from email_agent.prompt_cache import cache_key, supports_explicit_breakpoints, text_message, usage_counts
 
 CITATION_RE = re.compile(r"\[#(\d+)\]")
 ConfirmFn = Callable[[dict], Awaitable[bool]]
@@ -37,8 +38,13 @@ class Agent:
         self.tz = s.tz
         self.ctx = agent_tools.ToolContext(account, confirm)
         self.conversation_id = uuid.uuid4()
-        # Full Responses API input, kept across turns for multi-turn chat.
-        self.history: list[dict] = []
+        self.explicit_cache = supports_explicit_breakpoints(self.model)
+        # Full Responses API input, append-only across steps and turns so every request's prefix
+        # matches the previous one. The static system prompt comes first and ends in a breakpoint
+        # shared by all conversations of this account.
+        self.history: list[dict] = [
+            text_message("developer", system_prompt(account.email), breakpoint=self.explicit_cache)
+        ]
 
     async def _respond(self, final: bool = False):
         kwargs = {}
@@ -46,10 +52,14 @@ class Agent:
             kwargs["reasoning"] = self.reasoning
             # Stateless (store=False) multi-step reasoning needs the encrypted reasoning items back.
             kwargs["include"] = ["reasoning.encrypted_content"]
+        if self.explicit_cache:
+            # Implicit mode keeps OpenAI's automatic breakpoint at the end of each request (so step
+            # N+1 reuses step N) in addition to our explicit ones.
+            kwargs["prompt_cache_options"] = {"mode": "implicit"}
         return await self.client.responses.create(
             model=self.model,
-            instructions=system_prompt(self.account.email, self.tz),
             input=self.history,
+            prompt_cache_key=cache_key(self.account.id, "agent"),
             tools=agent_tools.TOOL_SCHEMAS,
             tool_choice="none" if final else "auto",
             parallel_tool_calls=True,
@@ -59,9 +69,11 @@ class Agent:
 
     async def run(self, question: str) -> AsyncIterator[Event]:
         started = time.monotonic()
-        self.history.append({"role": "user", "content": question})
+        self.history.append(text_message("developer", calendar_note(self.tz), breakpoint=False))
+        # Breakpoint after the question: later steps and turns all extend this prefix.
+        self.history.append(text_message("user", question, breakpoint=self.explicit_cache))
         events: list[Event] = []
-        usage = {"in": 0, "out": 0}
+        usage = {"in": 0, "cached": 0, "cache_write": 0, "out": 0}
 
         def emit(e: Event) -> Event:
             events.append(e)
@@ -72,9 +84,8 @@ class Agent:
             for step in range(1, self.max_steps + 2):
                 final = step > self.max_steps  # budget spent: force an answer without tools
                 resp = await self._respond(final=final)
-                if resp.usage:
-                    usage["in"] += resp.usage.input_tokens
-                    usage["out"] += resp.usage.output_tokens
+                for k, v in usage_counts(resp.usage).items():
+                    usage[k] += v
                 self.history.extend(item.model_dump(mode="json", exclude_none=True) for item in resp.output)
 
                 calls = [item for item in resp.output if item.type == "function_call"]
@@ -90,7 +101,7 @@ class Agent:
                 if not calls:
                     answer = resp.output_text.strip()
                     cited = sorted({int(m) for m in CITATION_RE.findall(answer)})
-                    yield emit(FinalAnswer(answer, cited, step, usage["in"], usage["out"]))
+                    yield emit(FinalAnswer(answer, cited, step, usage["in"], usage["out"], usage["cached"], usage["cache_write"]))
                     return
 
                 for c in calls:
@@ -129,10 +140,11 @@ class Agent:
             async with connection() as conn:
                 await conn.execute(
                     """INSERT INTO agent_runs (conversation_id, question, events, answer, input_tokens,
-                                               output_tokens, latency_ms)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                                               cached_tokens, cache_write_tokens, output_tokens, latency_ms)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (self.conversation_id, question, Jsonb([e.to_dict() for e in events], dumps=lambda o: json.dumps(o, default=str)),
-                     answer, usage["in"], usage["out"], int((time.monotonic() - started) * 1000)),
+                     answer, usage["in"], usage["cached"], usage["cache_write"], usage["out"],
+                     int((time.monotonic() - started) * 1000)),
                 )
         except Exception as e:  # tracing must never break an answer
             print(f"could not save agent run: {e}")

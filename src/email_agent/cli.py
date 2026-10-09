@@ -353,7 +353,11 @@ async def _render_turn(agent, question: str, verbose: bool) -> None:
                         when = f"{r['sent_at']:%Y-%m-%d}" if r["sent_at"] else ""
                         line = f"  [#{r['id']}] {r['subject']} — {r['from_name'] or r['from_addr']}, {when}"
                         console.print(escape(line))
-                console.print(f"[dim]{event.steps} steps · {event.input_tokens:,} in / {event.output_tokens:,} out tokens[/]")
+                hit = event.cached_tokens / event.input_tokens if event.input_tokens else 0
+                console.print(
+                    f"[dim]{event.steps} steps · {event.input_tokens:,} in ({event.cached_tokens:,} cached, "
+                    f"{hit:.0%}) / {event.output_tokens:,} out tokens[/]"
+                )
             if not isinstance(event, FinalAnswer):
                 status.start()
     finally:

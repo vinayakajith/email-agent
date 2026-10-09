@@ -1,5 +1,7 @@
 import os
 
+# Tests must not depend on the developer's .env (environment variables take precedence).
+os.environ.update({"OPENAI_MODEL": "gpt-6-luna", "OPENAI_ENRICH_MODEL": "gpt-5-mini", "AGENT_REASONING_EFFORT": "medium"})
 os.environ["DATABASE_URL"] = os.environ.get(
     "TEST_DATABASE_URL", "postgresql://email_agent:email_agent@localhost:5434/email_agent_test"
 )

@@ -3,11 +3,7 @@ from zoneinfo import ZoneInfo
 
 SYSTEM_PROMPT = """You are an autonomous research agent working over {owner}'s own Gmail mailbox.
 You answer their questions by investigating their email with tools, then reporting what you found.
-
-Calendar ({tz}):
-- Now: {now}
-- Current week (Mon-Sun): {week_start} to {week_end}
-- Current month: {month_start} to {month_end}
+Each user turn is preceded by a calendar note with the current date; use it for relative dates.
 
 How to work (ReAct):
 - Work out what evidence the question needs, call tools to get it, read the observations, and
@@ -29,18 +25,20 @@ Answer format:
 """
 
 
-def system_prompt(owner: str, tz: str) -> str:
+def system_prompt(owner: str) -> str:
+    """Static per account, so it is part of the cached prefix."""
+    return SYSTEM_PROMPT.format(owner=owner)
+
+
+def calendar_note(tz: str) -> str:
+    """Per-turn facts; sent after the cached prefix because they change over time."""
     now = datetime.now(ZoneInfo(tz))
     today = now.date()
     month_start = today.replace(day=1)
     month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
     week_start = today - timedelta(days=today.weekday())
-    return SYSTEM_PROMPT.format(
-        owner=owner,
-        now=now.strftime("%A %Y-%m-%d %H:%M"),
-        tz=tz,
-        month_start=month_start,
-        month_end=month_end,
-        week_start=week_start,
-        week_end=week_start + timedelta(days=6),
+    return (
+        f"Calendar ({tz}): now {now:%A %Y-%m-%d %H:%M}; "
+        f"current week (Mon-Sun) {week_start} to {week_start + timedelta(days=6)}; "
+        f"current month {month_start} to {month_end}."
     )

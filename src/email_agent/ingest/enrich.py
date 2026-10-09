@@ -15,6 +15,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ra
 
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
+from email_agent.prompt_cache import cache_key
 
 MAX_BODY_TOKENS = 2_000
 # Bump whenever EmailFacts or INSTRUCTIONS change meaning; `email-agent reenrich` then re-extracts
@@ -94,13 +95,15 @@ def _date(value: str | None) -> date | None:
 
 
 class Enricher:
-    def __init__(self, owner: str):
+    def __init__(self, owner: str, prompt_cache_key: str | None = None):
         s = get_settings()
         self.client = AsyncOpenAI(api_key=s.openai_api_key)
         self.model = s.openai_enrich_model
         self.reasoning = {"effort": s.enrich_reasoning_effort} if s.enrich_reasoning_effort else None
         self.instructions = INSTRUCTIONS.format(owner=owner)
         self.semaphore = asyncio.Semaphore(s.enrich_concurrency)
+        # Every call shares the instructions + output schema prefix; the key keeps them on one cache.
+        self.prompt_cache_key = prompt_cache_key
 
     @retry(
         retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)),
@@ -117,6 +120,7 @@ class Enricher:
                 input=render_email(email),
                 text_format=EmailFacts,
                 store=False,
+                prompt_cache_key=self.prompt_cache_key,
                 **kwargs,
             )
         if resp.output_parsed is None:
@@ -162,7 +166,7 @@ async def enrich_stage(account, job_id: int, progress, enricher: Enricher | None
 
     Failures stay at 'fetched' and are retried on the next run.
     """
-    enricher = enricher or Enricher(account.email)
+    enricher = enricher or Enricher(account.email, cache_key(account.id, "enrich"))
     async with connection() as conn:
         total = (
             await (

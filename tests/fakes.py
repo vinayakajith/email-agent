@@ -15,7 +15,7 @@ def _facts(**over) -> EmailFacts:
 class FakeEnricher:
     model = "fake-enrich"
 
-    def __init__(self, owner: str = "me@gmail.com"):
+    def __init__(self, owner: str = "me@gmail.com", prompt_cache_key: str | None = None):
         self.calls = 0
 
     async def extract(self, email: dict) -> EmailFacts:

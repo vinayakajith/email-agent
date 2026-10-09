@@ -1,3 +1,4 @@
+import copy
 import json
 from dataclasses import dataclass, field
 
@@ -53,7 +54,8 @@ class ScriptedClient:
         self.responses = self
 
     async def create(self, **kwargs):
-        self.calls.append(kwargs)
+        # Snapshot: the agent keeps appending to the same history list.
+        self.calls.append({**kwargs, "input": copy.deepcopy(kwargs["input"])})
         if kwargs["tool_choice"] == "none":
             return Resp([Item("message", text="Forced answer.")])
         return self.script.pop(0) if self.script else self.script_default()
@@ -111,5 +113,71 @@ async def test_multi_turn_keeps_history(ingested):
     agent = Agent(ingested, client=client)
     [e async for e in agent.run("first")]
     [e async for e in agent.run("second")]
-    user_turns = [i["content"] for i in client.calls[1]["input"] if i.get("role") == "user"]
+    user_turns = [i["content"][0]["text"] for i in client.calls[1]["input"] if i.get("role") == "user"]
     assert user_turns == ["first", "second"]
+
+
+async def test_every_request_extends_the_previous_prefix(ingested):
+    """Prompt caching needs each request's input to start with the previous request's input."""
+    client = ScriptedClient([
+        Resp([call("c1", "filter_emails", needs_action=True)]),
+        Resp([Item("message", text="One.")]),
+        Resp([Item("message", text="Two.")]),
+    ])
+    agent = Agent(ingested, client=client)
+    assert agent.model == "gpt-6-luna" and agent.explicit_cache
+    [e async for e in agent.run("first")]
+    [e async for e in agent.run("second")]
+
+    inputs = [c["input"] for c in client.calls]
+    for prev, cur in zip(inputs, inputs[1:]):
+        assert cur[: len(prev)] == prev
+    assert all(c["prompt_cache_key"] == f"email-agent:agent:{ingested.id}" for c in client.calls)
+
+    system, calendar, user = inputs[0][:3]
+    assert system["role"] == "developer" and "autonomous research agent" in system["content"][0]["text"]
+    assert calendar["role"] == "developer" and calendar["content"][0]["text"].startswith("Calendar")
+    assert user["role"] == "user"
+    # The time-dependent calendar note never sits before a breakpoint-marked stable block.
+    assert "prompt_cache_breakpoint" not in calendar["content"][0]
+
+
+async def test_breakpoints_only_for_models_that_support_them(ingested):
+    from email_agent.prompt_cache import supports_explicit_breakpoints
+
+    assert supports_explicit_breakpoints("gpt-6-luna") and supports_explicit_breakpoints("gpt-5.6")
+    assert not supports_explicit_breakpoints("gpt-5-mini") and not supports_explicit_breakpoints("o3")
+
+    client = ScriptedClient([Resp([Item("message", text="ok")])])
+    agent = Agent(ingested, client=client)
+    agent.model, agent.explicit_cache = "gpt-5-mini", False
+    agent.history = agent.history[:1]
+    agent.history[0]["content"][0].pop("prompt_cache_breakpoint", None)
+    [e async for e in agent.run("q")]
+    req = client.calls[0]
+    assert "prompt_cache_options" not in req
+    assert not any("prompt_cache_breakpoint" in b for i in req["input"] for b in i.get("content", []) if isinstance(b, dict))
+
+
+async def test_cached_tokens_are_tracked(ingested):
+    @dataclass
+    class Details:
+        cached_tokens: int
+        cache_write_tokens: int
+
+    @dataclass
+    class CachedUsage:
+        input_tokens: int = 1000
+        output_tokens: int = 10
+        input_tokens_details: Details = field(default_factory=lambda: Details(800, 150))
+
+    client = ScriptedClient([
+        Resp([call("c1", "filter_emails")], usage=CachedUsage()),
+        Resp([Item("message", text="done")], usage=CachedUsage()),
+    ])
+    events = [e async for e in Agent(ingested, client=client).run("q")]
+    final = events[-1]
+    assert (final.input_tokens, final.cached_tokens, final.cache_write_tokens) == (2000, 1600, 300)
+    async with connection() as conn:
+        run = await (await conn.execute("SELECT cached_tokens, cache_write_tokens FROM agent_runs")).fetchone()
+    assert run == {"cached_tokens": 1600, "cache_write_tokens": 300}

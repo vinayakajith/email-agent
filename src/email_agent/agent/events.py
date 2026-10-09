@@ -45,3 +45,5 @@ class FinalAnswer(Event):
     steps: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_tokens: int = 0
+    cache_write_tokens: int = 0
