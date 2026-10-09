@@ -34,6 +34,9 @@ class FakeIMAP:
     def fetch(self, uids):
         return [MAILBOX[u] for u in uids]
 
+    def flags_and_labels(self, uids):
+        return {u: (MAILBOX[u].flags, MAILBOX[u].labels) for u in uids}
+
 
 @pytest.fixture(autouse=True)
 def fake_imap(monkeypatch):

@@ -1,5 +1,6 @@
 import asyncio
 from datetime import date, timedelta
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -124,7 +125,10 @@ def ingest(
                 f"Rough token estimate: ~{n * EST_ENRICH_TOKENS / 1e6:.1f}M OpenAI tokens (extraction), "
                 f"~{n * EST_EMBED_TOKENS / 1e6:.1f}M Voyage tokens (embeddings)."
             )
-        if not n or not (yes or typer.confirm("Start ingestion?", default=True)):
+        if not n:
+            console.print("Nothing new to fetch. If an earlier run was interrupted, run `email-agent resume`.")
+            return
+        if not (yes or typer.confirm("Start ingestion?", default=True)):
             return
         columns = (TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), TimeRemainingColumn())
         with Progress(*columns, console=console) as bar:
@@ -167,6 +171,53 @@ def resume(account: str = typer.Option(None, help="Account email if several are 
         await finish_job(job_id)
 
     _run(main())
+
+
+@app.command()
+def sync(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
+    """Fetch and process mail that arrived since the last ingest or sync."""
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+    from email_agent.accounts import get_account
+    from email_agent.ingest.pipeline import run_sync
+
+    async def main():
+        acct = await get_account(account)
+        with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
+            tasks: dict[str, int] = {}
+
+            def progress(stage: str, done: int, total: int) -> None:
+                tasks.setdefault(stage, bar.add_task(stage, total=total))
+                bar.update(tasks[stage], completed=done, total=total)
+
+            return await run_sync(acct, progress)
+
+    try:
+        fetched, refreshed = _run(main())
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]Synced.[/] {fetched} new emails; read/star state refreshed for {refreshed}.")
+
+
+@app.command("eval-retrieval")
+def eval_retrieval(
+    golden: Path = typer.Argument(Path("evals/retrieval_golden.yaml")),
+    k: int = typer.Option(10),
+) -> None:
+    """Compare BM25, vector, hybrid and hybrid+rerank on hand-labelled questions."""
+    from email_agent.retrieval_eval import run_eval
+
+    if not golden.exists():
+        console.print(f"[red]{golden} not found.[/] Start from evals/retrieval_golden.example.yaml.")
+        raise typer.Exit(1)
+    scores, warnings = _run(run_eval(golden, k))
+    for w in warnings:
+        console.print(f"[yellow]warning:[/] {w}")
+    table = Table("mode", f"recall@{k}", "MRR")
+    for name, sc in scores.items():
+        table.add_row(name, f"{sc.recall:.3f}", f"{sc.mrr:.3f}")
+    console.print(table)
 
 
 @app.command()

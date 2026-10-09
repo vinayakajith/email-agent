@@ -31,3 +31,13 @@ async def test_enrich_saves_facts_and_leaves_failures_for_retry(account):
     # The fake raises for this sender; the email must stay at 'fetched' for the next run.
     assert stages["andre@example.fr"] == "fetched"
     assert sum(1 for s in stages.values() if s == "embedded") == len(MAILBOX) - 1
+
+
+def test_render_email_without_date():
+    from email_agent.ingest.enrich import render_email
+
+    text = render_email({
+        "from_name": "", "from_addr": "x@y.com", "to_addrs": [], "sent_at": None, "subject": "s",
+        "labels": [], "attachments": [], "list_unsubscribe": None, "body_text": "hi",
+    })
+    assert "Date: unknown" in text

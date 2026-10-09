@@ -190,6 +190,65 @@ async def run_ingest(account: Account, plan: FetchPlan, since: date | None, prog
     return job_id
 
 
+FLAG_REFRESH_DAYS = 30
+
+
+async def refresh_flags(account: Account) -> int:
+    """Re-read read/starred state and labels for recent mail, which changes after ingestion."""
+    from datetime import timedelta
+
+    def _scan():
+        with GmailIMAP(account.imap_host, account.email, account.password) as imap:
+            uids = imap.search(since=date.today() - timedelta(days=FLAG_REFRESH_DAYS))
+            return imap.uidvalidity, imap.flags_and_labels(uids)
+
+    uidvalidity, state = await asyncio.to_thread(_scan)
+    rows = [
+        {"a": account.id, "uid": uid, "labels": labels, "unread": "\\Seen" not in flags, "starred": "\\Flagged" in flags}
+        for uid, (flags, labels) in state.items()
+    ]
+    async with connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """UPDATE emails SET labels = %(labels)s, is_unread = %(unread)s, is_starred = %(starred)s
+                   WHERE account_id = %(a)s AND uid = %(uid)s""",
+                rows,
+            )
+    return len(rows)
+
+
+async def get_sync_state(account: Account) -> dict | None:
+    async with connection() as conn:
+        return await (
+            await conn.execute("SELECT * FROM sync_state WHERE account_id = %s AND folder = 'all_mail'", (account.id,))
+        ).fetchone()
+
+
+async def run_sync(account: Account, progress: Progress = _noop) -> tuple[int, int]:
+    """Fetch mail newer than the last sync, process it, and refresh recent flags.
+
+    Returns (new emails fetched, flags refreshed).
+    """
+    state = await get_sync_state(account)
+    if state is None:
+        raise RuntimeError("Nothing ingested yet; run `email-agent ingest` first.")
+    plan = await plan_fetch(account, None, min_uid=state["last_uid"] + 1)
+    if plan.uidvalidity != state["uidvalidity"]:
+        # UIDs were renumbered by the server: rescan the covered range; gm_msgid dedupes.
+        plan = await plan_fetch(account, state["since_date"])
+    job_id = await start_job(account, "sync", None)
+    try:
+        fetched = await fetch_stage(account, plan, job_id, progress)
+        await save_sync_state(account, plan.uidvalidity, state["since_date"])
+        await process_stages(account, job_id, progress)
+        refreshed = await refresh_flags(account)
+    except BaseException as e:
+        await finish_job(job_id, f"{type(e).__name__}: {e}")
+        raise
+    await finish_job(job_id)
+    return fetched, refreshed
+
+
 async def stage_counts(account_id: int) -> dict:
     async with connection() as conn:
         cur = await conn.execute(

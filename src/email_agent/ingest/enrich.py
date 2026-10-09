@@ -64,10 +64,11 @@ def truncate_tokens(text: str, max_tokens: int) -> str:
 
 def render_email(e: dict) -> str:
     attachments = ", ".join(a["filename"] for a in e["attachments"]) or "none"
+    date_line = f"Date: {e['sent_at']:%Y-%m-%d %H:%M %Z}\n" if e["sent_at"] else "Date: unknown\n"
     return (
         f"From: {e['from_name']} <{e['from_addr']}>\n"
         f"To: {', '.join(e['to_addrs'])}\n"
-        f"Date: {e['sent_at']:%Y-%m-%d %H:%M %Z}\n"
+        f"{date_line}"
         f"Subject: {e['subject']}\n"
         f"Gmail labels: {', '.join(e['labels']) or 'none'}\n"
         f"Attachments: {attachments}\n"

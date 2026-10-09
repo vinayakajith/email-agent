@@ -1,0 +1,12 @@
+# Copy to evals/retrieval_golden.yaml and replace with ~15 questions about YOUR mailbox.
+# Use `email-agent search "<topic>"` to find the right emails. An email counts as relevant
+# when it matches every key of one `expected` entry (from_contains / subject_contains / email_id).
+- question: "how much was my last credit card statement"
+  expected:
+    - {from_contains: hdfcbank, subject_contains: statement}
+- question: "netflix renewal charge"
+  expected:
+    - {from_contains: netflix}
+- question: "what did priya ask me about the Q4 deck"
+  expected:
+    - {from_contains: priya, subject_contains: Q4}

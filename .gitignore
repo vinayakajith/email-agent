@@ -6,3 +6,4 @@ __pycache__/
 *.eml.local
 data/
 .DS_Store
+evals/retrieval_golden.yaml
