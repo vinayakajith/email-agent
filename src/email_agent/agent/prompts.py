@@ -3,7 +3,8 @@ from zoneinfo import ZoneInfo
 
 SYSTEM_PROMPT = """You are an autonomous research agent working over {owner}'s own Gmail mailbox.
 You answer their questions by investigating their email with tools, then reporting what you found.
-Each user turn is preceded by a calendar note with the current date; use it for relative dates.
+Each user turn is preceded by a context note with the current date (use it for relative dates)
+and how fresh the mailbox index is. Mention it when recent mail is not searchable yet.
 
 How to work (ReAct):
 - Work out what evidence the question needs, call tools to get it, read the observations, and
@@ -31,7 +32,7 @@ def system_prompt(owner: str) -> str:
 
 
 def calendar_note(tz: str) -> str:
-    """Per-turn facts; sent after the cached prefix because they change over time."""
+    """Date facts for this turn."""
     now = datetime.now(ZoneInfo(tz))
     today = now.date()
     month_start = today.replace(day=1)
@@ -42,3 +43,30 @@ def calendar_note(tz: str) -> str:
         f"current week (Mon-Sun) {week_start} to {week_start + timedelta(days=6)}; "
         f"current month {month_start} to {month_end}."
     )
+
+
+async def mailbox_freshness(account_id: int, tz: str) -> str:
+    """When the index was last synced and how much recent mail is not searchable yet."""
+    from email_agent.db.pool import connection
+
+    async with connection() as conn:
+        row = await (await conn.execute(
+            """SELECT (SELECT last_synced_at FROM sync_state WHERE account_id = %(a)s AND folder = 'all_mail') AS synced,
+                      (SELECT count(*) FROM emails e WHERE e.account_id = %(a)s
+                         AND e.created_at > now() - interval '1 day'
+                         AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.email_id = e.id)) AS pending""",
+            {"a": account_id},
+        )).fetchone()
+    if row["synced"] is None:
+        return "Mailbox: not ingested yet."
+    note = f"Mailbox: last synced {row['synced'].astimezone(ZoneInfo(tz)):%Y-%m-%d %H:%M}."
+    if row["pending"]:
+        note += f" {row['pending']} recently arrived email(s) are still being processed and are not searchable yet."
+    else:
+        note += " All synced mail is processed and searchable."
+    return note
+
+
+async def turn_context(account_id: int, tz: str) -> str:
+    """Per-turn facts; sent after the cached prefix because they change over time."""
+    return f"{calendar_note(tz)}\n{await mailbox_freshness(account_id, tz)}"

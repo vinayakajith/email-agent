@@ -13,13 +13,14 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, InternalServerError, RateLimitError
 from psycopg.types.json import Jsonb
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 from email_agent.accounts import Account
 from email_agent.agent import tools as agent_tools
 from email_agent.agent.events import ConfirmationRequired, Event, FinalAnswer, Observation, Thought, ToolCall
-from email_agent.agent.prompts import calendar_note, system_prompt
+from email_agent.agent.prompts import system_prompt, turn_context
 from email_agent.config import get_settings
 from email_agent.db.pool import connection
 from email_agent.prompt_cache import CACHE_OPTIONS, cache_key, text_message, usage_counts
@@ -47,6 +48,14 @@ class Agent:
             text_message("developer", system_prompt(account.email), breakpoint=True)
         ]
 
+    # Background ingestion shares the OpenAI rate limits; an interactive turn waits it out
+    # instead of failing.
+    @retry(
+        retry=retry_if_exception_type((RateLimitError, APIConnectionError, APITimeoutError, InternalServerError)),
+        wait=wait_random_exponential(min=1, max=20),
+        stop=stop_after_attempt(6),
+        reraise=True,
+    )
     async def _respond(self, final: bool = False):
         kwargs = {}
         if self.reasoning:
@@ -67,7 +76,7 @@ class Agent:
 
     async def run(self, question: str) -> AsyncIterator[Event]:
         started = time.monotonic()
-        self.history.append(text_message("developer", calendar_note(self.tz), breakpoint=False))
+        self.history.append(text_message("developer", await turn_context(self.account.id, self.tz), breakpoint=False))
         # Breakpoint after the question: later steps and turns all extend this prefix.
         self.history.append(text_message("user", question, breakpoint=True))
         events: list[Event] = []

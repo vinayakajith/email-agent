@@ -186,3 +186,48 @@ async def test_cached_tokens_are_tracked(ingested):
     async with connection() as conn:
         run = await (await conn.execute("SELECT cached_tokens, cache_write_tokens FROM agent_runs")).fetchone()
     assert run == {"cached_tokens": 1600, "cache_write_tokens": 300}
+
+
+async def test_turn_context_reports_mail_not_yet_searchable(ingested):
+    from email_agent.agent.prompts import turn_context
+
+    async with connection() as conn:
+        await conn.execute("UPDATE emails SET created_at = now() - interval '2 days' WHERE from_addr = 'andre@example.fr'")
+    assert "All synced mail is processed and searchable." in await turn_context(ingested.id, "UTC")
+    async with connection() as conn:
+        await conn.execute("UPDATE emails SET created_at = now() WHERE from_addr = 'andre@example.fr'")
+    note = await turn_context(ingested.id, "UTC")
+    # One fixture email failed extraction, so it has no chunks yet.
+    assert "Mailbox: last synced" in note and "1 recently arrived email(s) are still being processed" in note
+    async with connection() as conn:
+        await conn.execute(
+            "INSERT INTO emails (account_id, gm_msgid, subject, from_addr) VALUES (%s, 4242, 'new', 'x@y.com')",
+            (ingested.id,),
+        )
+    assert "2 recently arrived" in await turn_context(ingested.id, "UTC")
+
+    client = ScriptedClient([Resp([Item("message", text="ok")])])
+    [e async for e in Agent(ingested, client=client).run("anything new?")]
+    context = client.calls[0]["input"][1]["content"][0]["text"]
+    assert context.startswith("Calendar") and "2 recently arrived" in context
+
+
+async def test_rate_limited_turn_is_retried(ingested, monkeypatch):
+    import httpx
+    from openai import RateLimitError
+    from tenacity import wait_none
+
+    monkeypatch.setattr(Agent._respond.retry, "wait", wait_none())
+    client = ScriptedClient([Resp([Item("message", text="answered")])])
+    real_create = client.create
+    failures = {"n": 2}
+
+    async def flaky(**kwargs):
+        if failures["n"]:
+            failures["n"] -= 1
+            raise RateLimitError("busy", response=httpx.Response(429, request=httpx.Request("POST", "https://x")), body=None)
+        return await real_create(**kwargs)
+
+    client.create = flaky
+    events = [e async for e in Agent(ingested, client=client).run("q")]
+    assert isinstance(events[-1], FinalAnswer) and events[-1].text == "answered"
