@@ -20,7 +20,13 @@ def setup_logging(default: str = "WARNING") -> None:
     from email_agent.config import get_settings
 
     level = (get_settings().log_level or default).upper()
-    logging.basicConfig(level=level, format="%(name)s: %(message)s", handlers=[RichHandler(console=console, show_path=False)])
+    logging.basicConfig(
+        level=level, format="%(name)s: %(message)s", force=True,
+        handlers=[RichHandler(console=console, show_path=False)],
+    )
+    # Library chatter (HTTP requests, IMAP) stays out unless explicitly asked for.
+    for noisy in ("httpx", "httpcore", "openai", "imapclient"):
+        logging.getLogger(noisy).setLevel(max(logging.WARNING, logging.getLogger().level))
 
 
 @app.callback()
@@ -283,6 +289,18 @@ def eval_retrieval(
     for name, sc in scores.items():
         table.add_row(name, f"{sc.recall:.3f}", f"{sc.mrr:.3f}")
     console.print(table)
+
+
+@app.command()
+def worker() -> None:
+    """Run the background worker: watches for new mail and runs queued ingestion jobs.
+
+    Keep it running in its own terminal (Ctrl-C stops it cleanly).
+    """
+    from email_agent.worker.main import Worker
+
+    setup_logging("INFO")
+    _run(Worker().run())
 
 
 @app.command()

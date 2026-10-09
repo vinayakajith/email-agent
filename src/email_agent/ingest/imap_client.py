@@ -80,6 +80,22 @@ class GmailIMAP:
                 out[uid] = ([_s(f) for f in data.get(b"FLAGS", ())], [_s(l) for l in data.get(b"X-GM-LABELS", ())])
         return out
 
+    def wait_for_changes(self, timeout: float) -> bool:
+        """IMAP IDLE for up to `timeout` seconds. True if the server announced new messages.
+
+        Re-entering IDLE on every call (about once a minute) also keeps the connection alive
+        well inside Gmail's 29-minute IDLE limit and typical NAT timeouts.
+        """
+        self.client.idle()
+        responses: list = []
+        try:
+            responses = list(self.client.idle_check(timeout=timeout))
+        finally:
+            # Responses that arrive between idle_check and DONE come back here; keep them.
+            _, late = self.client.idle_done()
+            responses += late
+        return any(len(r) >= 2 and r[1] == b"EXISTS" for r in responses)
+
     def fetch(self, uids: list[int]) -> list[RawMessage]:
         msgs = []
         for uid, data in self.client.fetch(uids, FETCH_ITEMS).items():

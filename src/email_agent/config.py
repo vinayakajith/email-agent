@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # Passed as reasoning.effort to the enrich model.
     enrich_reasoning_effort: str = "low"
     agent_max_steps: int = 15
+    # Background worker: parallel jobs (each for a different account) and the fallback poll
+    # interval that catches anything IMAP IDLE missed and refreshes read/starred state.
+    worker_concurrency: int = 1
+    worker_poll_minutes: int = 10
     # Empty means: WARNING for interactive commands, INFO for the worker.
     log_level: str = ""
     # Passed as reasoning.effort to the agent model.

@@ -177,6 +177,12 @@ async def unregister_worker(worker_id: str) -> None:
         await conn.execute("DELETE FROM workers WHERE id = %s", (worker_id,))
 
 
+async def prune_workers() -> None:
+    """Forget workers that died without unregistering."""
+    async with connection() as conn:
+        await conn.execute("DELETE FROM workers WHERE heartbeat_at < now() - interval '1 hour'")
+
+
 async def live_workers() -> int:
     async with connection() as conn:
         row = await (await conn.execute(
