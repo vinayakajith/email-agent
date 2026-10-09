@@ -170,9 +170,11 @@ async def finish_job(job_id: int, error: str | None = None) -> None:
 
 async def process_stages(account: Account, job_id: int, progress: Progress = _noop) -> None:
     """Run the post-fetch stages over everything not yet processed (also used for resume)."""
+    from email_agent.ingest.embed import embed_stage
     from email_agent.ingest.enrich import enrich_stage
 
     await enrich_stage(account, job_id, progress)
+    await embed_stage(account, job_id, progress)
 
 
 async def run_ingest(account: Account, plan: FetchPlan, since: date | None, progress: Progress = _noop) -> int:

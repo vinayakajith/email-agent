@@ -142,6 +142,63 @@ def ingest(
 
 
 @app.command()
+def resume(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
+    """Finish extraction and embedding for emails left behind by an interrupted ingest."""
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+    from email_agent.accounts import get_account
+    from email_agent.ingest.pipeline import finish_job, process_stages, start_job
+
+    async def main():
+        acct = await get_account(account)
+        job_id = await start_job(acct, "sync", None)
+        with Progress(TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(), console=console) as bar:
+            tasks: dict[str, int] = {}
+
+            def progress(stage: str, done: int, total: int) -> None:
+                tasks.setdefault(stage, bar.add_task(stage, total=total))
+                bar.update(tasks[stage], completed=done, total=total)
+
+            try:
+                await process_stages(acct, job_id, progress)
+            except BaseException as e:
+                await finish_job(job_id, f"{type(e).__name__}: {e}")
+                raise
+        await finish_job(job_id)
+
+    _run(main())
+
+
+@app.command()
+def search(
+    query: str,
+    mode: str = typer.Option("hybrid", help="bm25 | vector | hybrid"),
+    no_rerank: bool = typer.Option(False, "--no-rerank"),
+    k: int = typer.Option(10),
+    sender: str = typer.Option(None),
+    category: str = typer.Option(None),
+    since: str = typer.Option(None, help="YYYY-MM-DD"),
+    until: str = typer.Option(None, help="YYYY-MM-DD, inclusive"),
+) -> None:
+    """Debug view of retrieval: per-stage ranks for each hit."""
+    from email_agent.search.filters import SearchFilters
+    from email_agent.search.hybrid import hybrid_search
+
+    filters = SearchFilters(
+        date_from=date.fromisoformat(since) if since else None,
+        date_to=date.fromisoformat(until) if until else None,
+        sender=sender,
+        category=category,
+    )
+    hits = _run(hybrid_search(query, filters, k=k, mode=mode, rerank=not no_rerank))
+    table = Table("#", "score", "ranks", "date", "from", "subject")
+    for i, h in enumerate(hits, start=1):
+        ranks = " ".join(f"{name}={rank}" for name, rank in h.ranks.items() if rank is not None)
+        table.add_row(str(i), f"{h.score:.3f}", ranks, f"{h.sent_at:%Y-%m-%d}" if h.sent_at else "", h.from_addr, h.subject)
+    console.print(table)
+
+
+@app.command()
 def status(account: str = typer.Option(None, help="Account email if several are connected")) -> None:
     """Show ingestion progress and sync state."""
     from email_agent.accounts import get_account

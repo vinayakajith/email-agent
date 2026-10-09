@@ -46,7 +46,23 @@ async def account(db):
 @pytest.fixture(autouse=True)
 def offline_models(monkeypatch):
     """Never call OpenAI or Voyage from tests."""
-    from email_agent.ingest import enrich
-    from tests.fakes import FakeEnricher
+    from email_agent.ingest import embed, enrich
+    from email_agent.search import hybrid
+    from tests.fakes import FakeEmbedder, FakeEnricher, FakeReranker
 
     monkeypatch.setattr(enrich, "Enricher", FakeEnricher)
+    monkeypatch.setattr(embed, "Embedder", FakeEmbedder)
+    monkeypatch.setattr(hybrid, "_embedder", FakeEmbedder())
+    monkeypatch.setattr(hybrid, "_reranker", FakeReranker())
+
+
+@pytest.fixture
+async def ingested(account, monkeypatch):
+    """The fixture mailbox, fully ingested through every stage with fake models."""
+    from email_agent.ingest import pipeline
+    from tests.test_fetch import FakeIMAP
+
+    monkeypatch.setattr(pipeline, "GmailIMAP", FakeIMAP)
+    monkeypatch.setattr("email_agent.accounts.get_password", lambda email: "secret")
+    await pipeline.run_ingest(account, await pipeline.plan_fetch(account, None), None)
+    return account

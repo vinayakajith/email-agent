@@ -38,3 +38,35 @@ class FakeEnricher:
                           due_date="not a date", summary="AWS invoice")
         return _facts(category="work", priority=2, needs_action=True, action_summary="Send final deck",
                       summary="Priya asks for the final deck")
+
+
+import hashlib
+import math
+import re
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _hash_vector(text: str, dim: int = 1024) -> list[float]:
+    vec = [0.0] * dim
+    for w in _WORD.findall(text.lower()):
+        vec[int(hashlib.md5(w.encode()).hexdigest(), 16) % dim] += 1.0
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+class FakeEmbedder:
+    """Bag-of-words hashing: texts sharing words get similar vectors."""
+
+    async def embed_documents(self, texts, token_counts):
+        return [_hash_vector(t) for t in texts]
+
+    async def embed_query(self, query):
+        return _hash_vector(query)
+
+
+class FakeReranker:
+    async def rerank(self, query, documents, top_k):
+        q = set(_WORD.findall(query.lower()))
+        scored = [(i, len(q & set(_WORD.findall(d.lower()))) / (len(q) or 1)) for i, d in enumerate(documents)]
+        return sorted(scored, key=lambda x: x[1], reverse=True)[:top_k]

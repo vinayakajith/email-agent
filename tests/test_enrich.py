@@ -30,4 +30,4 @@ async def test_enrich_saves_facts_and_leaves_failures_for_retry(account):
     assert facts["AWS"]["due_date"] is None  # unparseable date is dropped, not fatal
     # The fake raises for this sender; the email must stay at 'fetched' for the next run.
     assert stages["andre@example.fr"] == "fetched"
-    assert sum(1 for s in stages.values() if s == "enriched") == len(MAILBOX) - 1
+    assert sum(1 for s in stages.values() if s == "embedded") == len(MAILBOX) - 1
