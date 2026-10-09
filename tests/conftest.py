@@ -41,3 +41,12 @@ async def account(db):
             )
         ).fetchone()
     return Account(**row)
+
+
+@pytest.fixture(autouse=True)
+def offline_models(monkeypatch):
+    """Never call OpenAI or Voyage from tests."""
+    from email_agent.ingest import enrich
+    from tests.fakes import FakeEnricher
+
+    monkeypatch.setattr(enrich, "Enricher", FakeEnricher)

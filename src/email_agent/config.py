@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     gmail_app_password: str = ""
 
     enrich_concurrency: int = 8
+    # Passed as reasoning.effort to the enrich model; empty string disables it for non-reasoning models.
+    enrich_reasoning_effort: str = "low"
     agent_max_steps: int = 15
 
 

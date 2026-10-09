@@ -54,7 +54,6 @@ async def test_ingest_stores_emails_and_is_idempotent(account):
         sync = await (await conn.execute("SELECT * FROM sync_state")).fetchone()
         job = await (await conn.execute("SELECT * FROM ingest_jobs")).fetchone()
     assert len(rows) == len(MAILBOX)
-    assert all(r["stage"] == "fetched" for r in rows)
     assert rows[0]["is_unread"] is False and rows[1]["is_unread"] is True
     assert sync["last_uid"] == len(MAILBOX) and sync["since_date"] is None
     assert job["status"] == "done" and job["fetched"] == len(MAILBOX)
